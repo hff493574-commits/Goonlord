@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: tradingview-chart
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python lse_datafeed.py
+    healthCheckPath: /config
+    autoDeploy: false
+    envVars:
+      - key: LSE_API_KEY
+        sync: false

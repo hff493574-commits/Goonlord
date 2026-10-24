@@ -2,13 +2,19 @@
 <html>
 	<head>
 
-		<title>TradingView Advanced Charts demo</title>
+		<title>LSE Futures Desk</title>
 
 		<!-- Fix for iOS Safari zooming bug -->
 		<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
+		<meta name="theme-color" content="#12191b">
+		<link rel="preconnect" href="https://fonts.googleapis.com">
+		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+		<link rel="stylesheet" href="dashboard.css?v=20261023-4">
 
 		<script type="text/javascript" src="charting_library/charting_library.standalone.js"></script>
-		<script type="text/javascript" src="datafeeds/udf/dist/bundle.js"></script>
+		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js"></script>
+		<script type="text/javascript" src="datafeeds/hourly-range-bands.js?v=20261024-4"></script>
 
 		<script type="text/javascript">
 
@@ -20,36 +26,332 @@
 			}
 
 			function initOnReady() {
-				var datafeedUrl = "https://demo-feed-data.tradingview.com";
-				var customDataUrl = getParameterByName('dataUrl');
-				if (customDataUrl !== "") {
-					datafeedUrl = customDataUrl.startsWith('https://') ? customDataUrl : `https://${customDataUrl}`;
-				}
+				var datafeedUrl = window.location.origin;
+				var themeSelect = document.getElementById('theme-select');
+				var initialTheme = localStorage.getItem('lse-theme') || getParameterByName('theme') || 'dark';
+				var widgetReady = false;
+				document.documentElement.dataset.theme = initialTheme;
+				themeSelect.value = initialTheme;
 
 				var widget = window.tvWidget = new TradingView.widget({
-					// debug: true, // uncomment this line to see Library errors and warnings in the console
-					fullscreen: true,
-					symbol: 'AAPL',
-					interval: '1D',
+					fullscreen: false,
+					autosize: true,
+					symbol: 'NQ.F',
+					interval: '1',
 					container: "tv_chart_container",
-
-					//	BEWARE: no trailing slash is expected in feed URL
-					datafeed: new Datafeeds.UDFCompatibleDatafeed(datafeedUrl, undefined, {
-						maxResponseLength: 1000,
-						expectedOrder: 'latestFirst',
-					}),
+					datafeed: new LSELiveDatafeed(datafeedUrl),
 					library_path: "charting_library/",
 					locale: getParameterByName('lang') || "en",
-
 					disabled_features: ["use_localstorage_for_settings"],
-					enabled_features: ["study_templates"],
+					enabled_features: ["study_templates", "seconds_resolution", "custom_resolutions"],
+					custom_indicators_getter: function (PineJS) {
+						return Promise.resolve([window.AverageHourlyRangeBands(PineJS)]);
+					},
+					theme: initialTheme,
+					overrides: {
+						"paneProperties.backgroundType": "solid",
+						"paneProperties.background": initialTheme === 'dark' ? 'rgba(11, 16, 18, 0.88)' : 'rgba(250, 251, 247, 0.88)',
+						"paneProperties.vertGridProperties.color": initialTheme === 'dark' ? 'rgba(178, 194, 186, 0.10)' : 'rgba(65, 82, 70, 0.10)',
+						"paneProperties.horzGridProperties.color": initialTheme === 'dark' ? 'rgba(178, 194, 186, 0.10)' : 'rgba(65, 82, 70, 0.10)',
+					},
 					charts_storage_url: 'https://saveload.tradingview.com',
 					charts_storage_api_version: "1.1",
 					client_id: 'tradingview.com',
 					user_id: 'public_user_id',
-					theme: getParameterByName('theme'),
 				});
-				window.frames[0].focus();
+
+				var activeSymbol = 'NQ.F';
+				var watchItems = document.getElementById('watch-items');
+				var searchInput = document.getElementById('watch-search');
+				var searchResults = document.getElementById('search-results');
+				var searchTimer;
+				var quoteStreams = new Map();
+				var quoteData = new Map();
+				var quoteHistoryRequests = new Set();
+				var watchlistStorageKey = 'lse-watchlist';
+				var futuresWatchlistMigrationKey = 'lse-watchlist-futures-added-v1';
+				var additionalFutures = [
+					{ symbol: 'FDAX.F', name: 'DAX Futures' },
+					{ symbol: 'FESX.F', name: 'EURO STOXX 50' },
+					{ symbol: 'FGBL.F', name: 'Euro-Bund Futures' },
+					{ symbol: 'SI.F', name: 'Silver Futures' },
+				];
+				var defaultWatchlist = [
+					{ symbol: 'NQ.F', name: 'NASDAQ 100' },
+					{ symbol: 'ES.F', name: 'S&P 500' },
+					{ symbol: 'GC.F', name: 'GOLD' },
+					{ symbol: 'FDAX.F', name: 'DAX Futures' },
+					{ symbol: 'FESX.F', name: 'EURO STOXX 50' },
+					{ symbol: 'FGBL.F', name: 'Euro-Bund Futures' },
+					{ symbol: 'SI.F', name: 'Silver Futures' },
+				];
+				var watchlist;
+				try {
+					watchlist = JSON.parse(localStorage.getItem(watchlistStorageKey) || 'null') || defaultWatchlist;
+				} catch (error) {
+					watchlist = defaultWatchlist;
+				}
+				if (localStorage.getItem(futuresWatchlistMigrationKey) !== 'true') {
+					additionalFutures.forEach(function (item) {
+						if (!watchlist.some(function (entry) { return entry.symbol === item.symbol; })) {
+							watchlist.push(item);
+						}
+					});
+					localStorage.setItem(watchlistStorageKey, JSON.stringify(watchlist));
+					localStorage.setItem(futuresWatchlistMigrationKey, 'true');
+				}
+
+				function displaySymbol(symbol) {
+					return symbol.replace(/\.F$/i, '');
+				}
+
+				function updateSymbol(symbol) {
+					activeSymbol = symbol;
+					watchItems.querySelectorAll('[data-symbol]').forEach(function (button) {
+						var active = button.dataset.symbol === symbol;
+						button.classList.toggle('is-active', active);
+						button.setAttribute('aria-pressed', String(active));
+					});
+				}
+
+				function selectSymbol(symbol) {
+					widget.activeChart().setSymbol(symbol);
+				}
+
+				function saveWatchlist() {
+					localStorage.setItem(watchlistStorageKey, JSON.stringify(watchlist));
+				}
+
+				function formatQuotePrice(value) {
+					return new Intl.NumberFormat('en-US', {
+						maximumFractionDigits: value >= 1000 ? 2 : 4,
+					}).format(value);
+				}
+
+				function renderQuote(symbol) {
+					var quote = quoteData.get(symbol);
+					var select = Array.from(watchItems.querySelectorAll('[data-symbol]')).find(function (item) {
+						return item.dataset.symbol === symbol;
+					});
+					if (!select || !quote) { return; }
+					var price = select.querySelector('.watch-quote-price');
+					var change = select.querySelector('.watch-quote-change');
+					price.textContent = quote.last === null ? '—' : formatQuotePrice(quote.last);
+					price.title = quote.last === null ? 'Waiting for a live trade' : formatQuotePrice(quote.last);
+					if (quote.last === null || quote.previousClose === null || quote.previousClose === 0) {
+						change.textContent = '—';
+						change.classList.remove('is-positive', 'is-negative');
+						return;
+					}
+					var percentage = (quote.last - quote.previousClose) / quote.previousClose * 100;
+					change.textContent = (percentage > 0 ? '+' : '') + percentage.toFixed(2) + '%';
+					change.classList.toggle('is-positive', percentage >= 0);
+					change.classList.toggle('is-negative', percentage < 0);
+				}
+
+				function loadPreviousClose(symbol) {
+					if (quoteData.has(symbol) || quoteHistoryRequests.has(symbol)) { return; }
+					quoteHistoryRequests.add(symbol);
+					var now = Math.floor(Date.now() / 1000);
+					var url = new URL(datafeedUrl + '/history');
+					url.searchParams.set('symbol', symbol);
+					url.searchParams.set('resolution', '1D');
+					url.searchParams.set('from', String(now - 14 * 86400));
+					url.searchParams.set('to', String(now));
+					url.searchParams.set('countback', '3');
+					fetch(url.toString())
+						.then(function (response) {
+							if (!response.ok) { throw new Error('Quote history request failed for ' + symbol); }
+							return response.json();
+						})
+						.then(function (history) {
+							if (history.s === 'error') { throw new Error(history.errmsg); }
+							if (history.s !== 'ok' || !history.c.length) { return; }
+							var lastIndex = history.c.length - 1;
+							var latestDate = new Date(history.t[lastIndex] * 1000);
+							var today = new Date();
+							var isCurrentDayBar = latestDate.getUTCFullYear() === today.getUTCFullYear() &&
+								latestDate.getUTCMonth() === today.getUTCMonth() &&
+								latestDate.getUTCDate() === today.getUTCDate();
+							var previousIndex = isCurrentDayBar ? lastIndex - 1 : lastIndex;
+							if (previousIndex < 0) { return; }
+							var quote = quoteData.get(symbol) || {
+								last: Number(history.c[lastIndex]),
+								previousClose: null,
+							};
+							quote.previousClose = Number(history.c[previousIndex]);
+							quoteData.set(symbol, quote);
+							renderQuote(symbol);
+						})
+						.catch(function (error) { console.error('Watchlist quote:', error); })
+						.finally(function () { quoteHistoryRequests.delete(symbol); });
+				}
+
+				function syncQuoteStreams() {
+					var symbols = new Set(watchlist.map(function (item) { return item.symbol; }));
+					quoteStreams.forEach(function (source, symbol) {
+						if (!symbols.has(symbol)) {
+							source.close();
+							quoteStreams.delete(symbol);
+							quoteData.delete(symbol);
+						}
+					});
+					symbols.forEach(function (symbol) {
+						loadPreviousClose(symbol);
+						renderQuote(symbol);
+						if (quoteStreams.has(symbol)) { return; }
+						var streamUrl = new URL(datafeedUrl + '/stream');
+						streamUrl.searchParams.set('symbol', symbol);
+						streamUrl.searchParams.set('start', new Date().toISOString());
+						var source = new EventSource(streamUrl.toString());
+						source.onmessage = function (event) {
+							var tick = JSON.parse(event.data);
+							if (tick.error) {
+								console.error('Watchlist live quote for ' + symbol + ':', tick.error);
+								return;
+							}
+							var quote = quoteData.get(symbol) || { last: null, previousClose: null };
+							quote.last = Number(tick.price);
+							quoteData.set(symbol, quote);
+							renderQuote(symbol);
+						};
+						source.onerror = function () {
+							console.warn('Watchlist quote stream reconnecting for', symbol);
+						};
+						quoteStreams.set(symbol, source);
+					});
+				}
+
+				function renderWatchlist() {
+					watchItems.replaceChildren();
+					document.getElementById('watch-count').textContent = String(watchlist.length).padStart(2, '0');
+					watchlist.forEach(function (item) {
+						var row = document.createElement('div');
+						row.className = 'watch-row';
+						var select = document.createElement('button');
+						select.type = 'button';
+						select.className = 'watch-select';
+						select.dataset.symbol = item.symbol;
+						select.setAttribute('aria-pressed', 'false');
+						select.innerHTML = '<span class="watch-symbol"></span><span class="watch-description"></span><span class="watch-quote-price">—</span><span class="watch-quote-change">—</span>';
+						select.querySelector('.watch-symbol').textContent = displaySymbol(item.symbol);
+						select.querySelector('.watch-description').textContent = item.name;
+						select.title = item.symbol + ' · ' + item.name;
+						select.addEventListener('click', function () { selectSymbol(item.symbol); });
+						var remove = document.createElement('button');
+						remove.type = 'button';
+						remove.className = 'watch-remove';
+						remove.setAttribute('aria-label', 'Remove ' + item.symbol + ' from watchlist');
+						remove.textContent = '−';
+						remove.addEventListener('click', function () {
+							watchlist = watchlist.filter(function (entry) { return entry.symbol !== item.symbol; });
+						saveWatchlist();
+						renderWatchlist();
+						});
+						row.append(select, remove);
+						watchItems.append(row);
+					});
+					updateSymbol(activeSymbol);
+					syncQuoteStreams();
+				}
+
+				function addToWatchlist(item) {
+					if (!watchlist.some(function (entry) { return entry.symbol === item.symbol; })) {
+						watchlist.push({ symbol: item.symbol, name: item.name || item.description || item.symbol });
+						saveWatchlist();
+						renderWatchlist();
+					}
+					searchInput.value = '';
+					searchResults.replaceChildren();
+					selectSymbol(item.symbol);
+				}
+
+				function searchSymbols(query) {
+					if (!query) {
+						searchResults.replaceChildren();
+						return;
+					}
+					fetch(datafeedUrl + '/search?query=' + encodeURIComponent(query))
+						.then(function (response) { return response.json(); })
+						.then(function (results) {
+							searchResults.replaceChildren();
+							results.slice(0, 8).forEach(function (result) {
+								var option = document.createElement('button');
+								option.type = 'button';
+								option.className = 'search-result';
+								option.innerHTML = '<strong></strong><span></span>';
+								option.querySelector('strong').textContent = displaySymbol(result.symbol);
+								option.querySelector('span').textContent = result.description;
+								option.addEventListener('click', function () {
+									addToWatchlist({ symbol: result.symbol, name: result.description });
+								});
+								searchResults.append(option);
+							});
+						});
+				}
+
+				searchInput.addEventListener('input', function () {
+					window.clearTimeout(searchTimer);
+					searchTimer = window.setTimeout(function () { searchSymbols(searchInput.value.trim()); }, 220);
+				});
+				document.addEventListener('click', function (event) {
+					if (!event.target.closest('.watch-search-wrap')) { searchResults.replaceChildren(); }
+				});
+
+				function applyTheme(theme, persist) {
+					document.documentElement.dataset.theme = theme;
+					document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#12191b' : '#edf1e9';
+					if (persist) { localStorage.setItem('lse-theme', theme); }
+					if (widgetReady) { widget.changeTheme(theme); }
+				}
+
+				themeSelect.addEventListener('change', function () { applyTheme(themeSelect.value, true); });
+
+				function applyWallpaper(image, persist) {
+					document.documentElement.style.setProperty('--wallpaper-image', image ? 'url("' + image + '")' : 'none');
+					document.documentElement.classList.toggle('has-wallpaper', Boolean(image));
+					document.getElementById('ui-status').textContent = image ? 'CUSTOM BACKGROUND' : 'HISTORY + LIVE TICKS';
+					if (persist) {
+						try { localStorage.setItem('lse-wallpaper', image || ''); }
+						catch (error) { document.getElementById('ui-status').textContent = 'Image applied for this session'; }
+					}
+				}
+
+				var savedWallpaper = localStorage.getItem('lse-wallpaper');
+				if (savedWallpaper) { applyWallpaper(savedWallpaper, false); }
+				document.getElementById('wallpaper-input').addEventListener('change', function (event) {
+					var file = event.target.files && event.target.files[0];
+					if (!file || !file.type.startsWith('image/')) { return; }
+					var reader = new FileReader();
+					reader.onload = function () { applyWallpaper(reader.result, true); };
+					reader.readAsDataURL(file);
+				});
+				document.getElementById('clear-wallpaper').addEventListener('click', function () { applyWallpaper('', true); });
+
+				widget.onChartReady(function () {
+					widgetReady = true;
+					var chart = widget.activeChart();
+					chart.onSymbolChanged().subscribe(null, function (info) {
+						updateSymbol(info.ticker || info.name);
+					});
+					chart.onDataLoaded().subscribe(null, function () {
+						var previousNames = [
+							"NY 18:00 Hourly & 4-Hour Range Bands",
+							"Average Hourly & 4-Hour Range Bands",
+							"Average Hourly Range Bands",
+							"IV WALLS[D + W + H + 4H]",
+						];
+						chart.getAllStudies().forEach(function (study) {
+							if (previousNames.indexOf(study.name) !== -1) {
+								chart.removeEntity(study.id);
+							}
+						});
+						chart.createStudy("NY 18:00 Hourly & 4-Hour Range Bands", false, false)
+							.catch(function (error) { console.error('Unable to add hourly range bands:', error); });
+					}, true);
+					renderWatchlist();
+				});
+
 			};
 
 			window.addEventListener('DOMContentLoaded', initOnReady, false);
@@ -57,8 +359,29 @@
 
 	</head>
 
-	<body style="margin:0px;">
-		<div id="tv_chart_container"></div>
+	<body>
+		<div class="desk-shell">
+			<div class="terminal-grid">
+				<main class="chart-workspace">
+					<div class="chart-frame"><div id="tv_chart_container"></div></div>
+				</main>
+				<aside class="watchlist-panel" aria-label="Watchlist">
+					<div class="watchlist-tools">
+						<label class="theme-control" for="theme-select"><span>THEME</span><select id="theme-select" aria-label="Chart theme"><option value="dark">Dark</option><option value="light">Light</option></select></label>
+						<label class="tool-button" for="wallpaper-input" title="Choose a background image">Wallpaper<input id="wallpaper-input" type="file" accept="image/*" hidden></label>
+						<button id="clear-wallpaper" class="tool-button tool-button-quiet" type="button" title="Remove background image">Reset</button>
+					</div>
+					<div class="panel-heading"><div><span class="section-index">01</span><h2>Watchlist</h2></div><span id="watch-count" class="watch-count">03</span></div>
+					<div id="watch-items" class="watch-items"></div>
+					<div class="watch-search-wrap">
+						<label class="field-label" for="watch-search">ADD SYMBOL</label>
+						<input id="watch-search" type="search" autocomplete="off" placeholder="Search markets" aria-label="Search symbols to add">
+						<div id="search-results" class="search-results" role="listbox" aria-label="Symbol search results"></div>
+					</div>
+					<div class="watchlist-foot"><span class="feed-mark"></span><span id="ui-status">HISTORY + LIVE TICKS</span></div>
+				</aside>
+			</div>
+		</div>
 	</body>
 
 </html>
