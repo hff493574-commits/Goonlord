@@ -6,6 +6,7 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
+const chartPage = fs.readFileSync(path.join(__dirname, "../index.html"), "utf8");
 const browser = {};
 vm.runInNewContext(
 	fs.readFileSync(path.join(__dirname, "../datafeeds/hourly-range-bands.js"), "utf8"),
@@ -217,6 +218,10 @@ test("uses exactly 18:00 New York as a new 4-hour period boundary", () => {
 
 	assert.equal(result[6], 102);
 	assert.equal(result[7], 98);
+});
+
+test("defaults chart time labels to New York to show the 18:00 NY boundary", () => {
+	assert.match(chartPage, /timezone:\s*'America\/New_York'/);
 });
 
 test("keeps the New York 6pm anchor across daylight-saving time", () => {
