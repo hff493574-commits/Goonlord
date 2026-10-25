@@ -10,6 +10,16 @@
 			],
 			"isBackground": true,
 			"problemMatcher": []
+		},
+		{
+			"label": "Stream BTC/USD ticks",
+			"type": "shell",
+			"command": "python3",
+			"args": [
+				"stream_btc.py"
+			],
+			"isBackground": true,
+			"problemMatcher": []
 		}
 	]
 }

@@ -10,10 +10,10 @@
 		<link rel="preconnect" href="https://fonts.googleapis.com">
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-		<link rel="stylesheet" href="dashboard.css?v=20261023-4">
+		<link rel="stylesheet" href="dashboard.css?v=20261025-2">
 
 		<script type="text/javascript" src="charting_library/charting_library.standalone.js"></script>
-		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js"></script>
+		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261025-3"></script>
 		<script type="text/javascript" src="datafeeds/hourly-range-bands.js?v=20261024-4"></script>
 
 		<script type="text/javascript">
@@ -30,6 +30,8 @@
 				var themeSelect = document.getElementById('theme-select');
 				var initialTheme = localStorage.getItem('lse-theme') || getParameterByName('theme') || 'dark';
 				var widgetReady = false;
+				var chartLayoutReady = false;
+				var chartLayoutStorageKey = 'lse-chart-layout-v1';
 				document.documentElement.dataset.theme = initialTheme;
 				themeSelect.value = initialTheme;
 
@@ -45,13 +47,14 @@
 					locale: getParameterByName('lang') || "en",
 					disabled_features: ["use_localstorage_for_settings"],
 					enabled_features: ["study_templates", "seconds_resolution", "custom_resolutions"],
+					auto_save_delay: 1,
 					custom_indicators_getter: function (PineJS) {
 						return Promise.resolve([window.AverageHourlyRangeBands(PineJS)]);
 					},
 					theme: initialTheme,
 					overrides: {
 						"paneProperties.backgroundType": "solid",
-						"paneProperties.background": initialTheme === 'dark' ? 'rgba(11, 16, 18, 0.88)' : 'rgba(250, 251, 247, 0.88)',
+						"paneProperties.background": initialTheme === 'dark' ? 'rgba(11, 16, 18, 0)' : 'rgba(250, 251, 247, 0)',
 						"paneProperties.vertGridProperties.color": initialTheme === 'dark' ? 'rgba(178, 194, 186, 0.10)' : 'rgba(65, 82, 70, 0.10)',
 						"paneProperties.horzGridProperties.color": initialTheme === 'dark' ? 'rgba(178, 194, 186, 0.10)' : 'rgba(65, 82, 70, 0.10)',
 					},
@@ -61,10 +64,35 @@
 					user_id: 'public_user_id',
 				});
 
+				function saveChartLayout() {
+					if (!chartLayoutReady) { return; }
+					try {
+						widget.save(function (state) {
+							try {
+								localStorage.setItem(chartLayoutStorageKey, JSON.stringify(state));
+							} catch (error) {
+								console.error('Unable to save chart layout:', error);
+							}
+						}, { includeDrawings: true });
+					} catch (error) {
+						console.error('Unable to save chart layout:', error);
+					}
+				}
+
+				window.addEventListener('pagehide', saveChartLayout);
+
 				var activeSymbol = 'NQ.F';
 				var watchItems = document.getElementById('watch-items');
 				var searchInput = document.getElementById('watch-search');
 				var searchResults = document.getElementById('search-results');
+				var watchSearchWrap = document.getElementById('watch-search-wrap');
+				var watchSearchToggle = document.getElementById('watch-search-toggle');
+				var tickTapeToggle = document.getElementById('tick-tape-toggle');
+				var tickTape = document.getElementById('tick-tape');
+				var tickTapeClose = document.getElementById('tick-tape-close');
+				var tickTapeStatus = document.getElementById('tick-tape-status');
+				var tickTapeItems = document.getElementById('tick-tape-items');
+				var tickTapeSource = null;
 				var searchTimer;
 				var quoteStreams = new Map();
 				var quoteData = new Map();
@@ -262,10 +290,105 @@
 						saveWatchlist();
 						renderWatchlist();
 					}
-					searchInput.value = '';
-					searchResults.replaceChildren();
+					setWatchSearchOpen(false);
 					selectSymbol(item.symbol);
 				}
+
+				function setWatchSearchOpen(open) {
+					watchSearchWrap.hidden = !open;
+					watchSearchToggle.setAttribute('aria-expanded', String(open));
+					if (open) {
+						searchInput.focus();
+					} else {
+						searchInput.value = '';
+						searchResults.replaceChildren();
+					}
+				}
+
+				function startTickTape(symbol) {
+					if (tickTapeSource) {
+						tickTapeSource.close();
+						tickTapeSource = null;
+					}
+					tickTapeItems.replaceChildren();
+					tickTapeStatus.textContent = 'CONNECTING';
+					var streamUrl = new URL(datafeedUrl + '/stream');
+					streamUrl.searchParams.set('symbol', symbol);
+					streamUrl.searchParams.set('start', new Date().toISOString());
+					var source = new EventSource(streamUrl.toString());
+					tickTapeSource = source;
+					var symbolLabel = tickTape.querySelector('.tick-tape-symbol');
+					symbolLabel.textContent = symbol;
+					tickTape.setAttribute('aria-label', symbol + ' live tick tape');
+					tickTapeToggle.title = 'Open live tick tape for ' + symbol;
+					tickTapeToggle.setAttribute('aria-label', 'Open live tick tape for ' + symbol);
+					source.onopen = function () {
+						if (tickTapeSource === source) { tickTapeStatus.textContent = 'LIVE'; }
+					};
+					source.onmessage = function (event) {
+						if (tickTapeSource !== source) { return; }
+						try {
+							var tick = JSON.parse(event.data);
+							if (tick.error) {
+								tickTapeStatus.textContent = 'FEED ERROR';
+								console.error(symbol + ' tape:', tick.error);
+								return;
+							}
+							var row = document.createElement('div');
+							row.className = 'tick-tape-row';
+							var time = document.createElement('time');
+							var date = new Date(Number(tick.timestamp_ms || Number(tick.time) * 1000));
+							time.textContent = Number.isNaN(date.getTime()) ? '--:--:--.---' :
+								date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+							var price = document.createElement('span');
+							price.className = 'tick-tape-price';
+							price.textContent = Number(tick.price).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 8 });
+							var volume = document.createElement('span');
+							volume.textContent = Number(tick.volume || 0).toLocaleString(undefined, { maximumFractionDigits: 8 });
+							row.append(time, price, volume);
+							tickTapeItems.prepend(row);
+							while (tickTapeItems.childElementCount > 80) {
+								tickTapeItems.lastElementChild.remove();
+							}
+							tickTapeStatus.textContent = 'LIVE';
+						} catch (error) {
+							tickTapeStatus.textContent = 'INVALID TICK';
+							console.error('Unable to read BTC/USD tick:', error);
+						}
+					};
+					source.onerror = function () {
+						if (tickTapeSource === source) { tickTapeStatus.textContent = 'RECONNECTING'; }
+					};
+				}
+
+				function setTickTapeOpen(open) {
+					tickTape.hidden = !open;
+					tickTapeToggle.setAttribute('aria-expanded', String(open));
+					if (open) {
+						startTickTape(activeSymbol);
+						return;
+					}
+					if (tickTapeSource) {
+						tickTapeSource.close();
+						tickTapeSource = null;
+					}
+					tickTapeStatus.textContent = 'STOPPED';
+				}
+
+				tickTapeToggle.addEventListener('click', function () {
+					setTickTapeOpen(tickTape.hidden);
+				});
+				tickTapeClose.addEventListener('click', function () { setTickTapeOpen(false); });
+				watchSearchToggle.addEventListener('click', function () {
+					setWatchSearchOpen(watchSearchWrap.hidden);
+				});
+				document.addEventListener('keydown', function (event) {
+					if (event.key === 'Escape' && !watchSearchWrap.hidden) { setWatchSearchOpen(false); }
+					if (event.key === 'Escape' && !tickTape.hidden) {
+						setTickTapeOpen(false);
+						tickTapeToggle.focus();
+					}
+				});
 
 				function searchSymbols(query) {
 					if (!query) {
@@ -296,7 +419,10 @@
 					searchTimer = window.setTimeout(function () { searchSymbols(searchInput.value.trim()); }, 220);
 				});
 				document.addEventListener('click', function (event) {
-					if (!event.target.closest('.watch-search-wrap')) { searchResults.replaceChildren(); }
+					if (!event.target.closest('.watch-search-wrap') && !event.target.closest('#watch-search-toggle')) {
+						searchResults.replaceChildren();
+						if (!watchSearchWrap.hidden) { setWatchSearchOpen(false); }
+					}
 				});
 
 				function applyTheme(theme, persist) {
@@ -308,9 +434,33 @@
 
 				themeSelect.addEventListener('change', function () { applyTheme(themeSelect.value, true); });
 
+				var wallpaperOpacityControl = document.getElementById('wallpaper-opacity-control');
+				var wallpaperOpacityInput = document.getElementById('wallpaper-opacity');
+				var wallpaperOpacityOutput = document.getElementById('wallpaper-opacity-value');
+				var clearWallpaperButton = document.getElementById('clear-wallpaper');
+
+				function applyWallpaperOpacity(value, persist) {
+					var opacity = Number(value);
+					if (!Number.isFinite(opacity)) { opacity = 18; }
+					opacity = Math.round(Math.max(0, Math.min(100, opacity)));
+					document.documentElement.style.setProperty('--wallpaper-overlay-opacity', (100 - opacity) + '%');
+					wallpaperOpacityInput.value = String(opacity);
+					wallpaperOpacityOutput.textContent = opacity + '%';
+					if (persist) {
+						try { localStorage.setItem('lse-wallpaper-opacity', String(opacity)); }
+						catch (error) { document.getElementById('ui-status').textContent = 'Opacity applied for this session'; }
+					}
+				}
+
+				wallpaperOpacityInput.addEventListener('input', function () {
+					applyWallpaperOpacity(wallpaperOpacityInput.value, true);
+				});
+
 				function applyWallpaper(image, persist) {
 					document.documentElement.style.setProperty('--wallpaper-image', image ? 'url("' + image + '")' : 'none');
 					document.documentElement.classList.toggle('has-wallpaper', Boolean(image));
+					wallpaperOpacityControl.hidden = !image;
+					clearWallpaperButton.hidden = !image;
 					document.getElementById('ui-status').textContent = image ? 'CUSTOM BACKGROUND' : 'HISTORY + LIVE TICKS';
 					if (persist) {
 						try { localStorage.setItem('lse-wallpaper', image || ''); }
@@ -318,6 +468,8 @@
 					}
 				}
 
+				var savedWallpaperOpacity = localStorage.getItem('lse-wallpaper-opacity');
+				applyWallpaperOpacity(savedWallpaperOpacity === null ? 18 : savedWallpaperOpacity, false);
 				var savedWallpaper = localStorage.getItem('lse-wallpaper');
 				if (savedWallpaper) { applyWallpaper(savedWallpaper, false); }
 				document.getElementById('wallpaper-input').addEventListener('change', function (event) {
@@ -329,27 +481,41 @@
 				});
 				document.getElementById('clear-wallpaper').addEventListener('click', function () { applyWallpaper('', true); });
 
-				widget.onChartReady(function () {
+				widget.onChartReady(async function () {
 					widgetReady = true;
 					var chart = widget.activeChart();
+					widget.subscribe('onAutoSaveNeeded', saveChartLayout);
 					chart.onSymbolChanged().subscribe(null, function (info) {
-						updateSymbol(info.ticker || info.name);
+						var symbol = info.ticker || info.name;
+						updateSymbol(symbol);
+						if (!tickTape.hidden) { startTickTape(symbol); }
 					});
 					chart.onDataLoaded().subscribe(null, function () {
 						var previousNames = [
-							"NY 18:00 Hourly & 4-Hour Range Bands",
 							"Average Hourly & 4-Hour Range Bands",
 							"Average Hourly Range Bands",
 							"IV WALLS[D + W + H + 4H]",
 						];
-						chart.getAllStudies().forEach(function (study) {
+						var studies = chart.getAllStudies();
+						studies.forEach(function (study) {
 							if (previousNames.indexOf(study.name) !== -1) {
 								chart.removeEntity(study.id);
 							}
 						});
-						chart.createStudy("NY 18:00 Hourly & 4-Hour Range Bands", false, false)
-							.catch(function (error) { console.error('Unable to add hourly range bands:', error); });
+						if (!studies.some(function (study) { return study.name === "NY 18:00 Hourly & 4-Hour Range Bands"; })) {
+							chart.createStudy("NY 18:00 Hourly & 4-Hour Range Bands", false, false)
+								.catch(function (error) { console.error('Unable to add hourly range bands:', error); });
+						}
 					}, true);
+					try {
+						var savedLayout = localStorage.getItem(chartLayoutStorageKey);
+						if (savedLayout) {
+							await widget.load(JSON.parse(savedLayout));
+						}
+					} catch (error) {
+						console.error('Unable to restore saved chart layout:', error);
+					}
+					chartLayoutReady = true;
 					renderWatchlist();
 				});
 
@@ -369,16 +535,42 @@
 				<aside class="watchlist-panel" aria-label="Watchlist">
 					<div class="watchlist-tools">
 						<label class="theme-control" for="theme-select"><span>THEME</span><select id="theme-select" aria-label="Chart theme"><option value="dark">Dark</option><option value="light">Light</option></select></label>
-						<label class="tool-button" for="wallpaper-input" title="Choose a background image">Wallpaper<input id="wallpaper-input" type="file" accept="image/*" hidden></label>
-						<button id="clear-wallpaper" class="tool-button tool-button-quiet" type="button" title="Remove background image">Reset</button>
+						<details class="wallpaper-menu">
+							<summary class="tool-button">Wallpaper</summary>
+							<div class="wallpaper-menu-panel">
+								<label class="wallpaper-file-button" for="wallpaper-input">Choose image</label>
+								<input id="wallpaper-input" type="file" accept="image/*" hidden>
+								<div id="wallpaper-opacity-control" class="wallpaper-opacity-control" hidden>
+									<label for="wallpaper-opacity">IMAGE OPACITY</label>
+									<output id="wallpaper-opacity-value" for="wallpaper-opacity">18%</output>
+									<input id="wallpaper-opacity" type="range" min="0" max="100" step="1" value="18" aria-label="Wallpaper image opacity">
+								</div>
+								<button id="clear-wallpaper" class="wallpaper-reset" type="button" hidden>Remove image</button>
+							</div>
+						</details>
 					</div>
-					<div class="panel-heading"><div><span class="section-index">01</span><h2>Watchlist</h2></div><span id="watch-count" class="watch-count">03</span></div>
-					<div id="watch-items" class="watch-items"></div>
-					<div class="watch-search-wrap">
+					<div class="panel-heading">
+						<div><span class="section-index">01</span><h2>Watchlist</h2></div>
+						<div class="panel-heading-actions">
+							<span id="watch-count" class="watch-count">03</span>
+							<button id="tick-tape-toggle" class="tick-tape-toggle" type="button" title="Open live tick tape for current chart symbol" aria-label="Open live tick tape for current chart symbol" aria-expanded="false" aria-controls="tick-tape">TAPE</button>
+							<button id="watch-search-toggle" class="watch-add-toggle" type="button" title="Add symbol" aria-label="Add symbol" aria-expanded="false" aria-controls="watch-search-wrap">+</button>
+						</div>
+					</div>
+					<section id="tick-tape" class="tick-tape" aria-label="Live tick tape" hidden>
+						<div class="tick-tape-heading">
+							<div><span class="feed-mark"></span><strong class="tick-tape-symbol"></strong><span id="tick-tape-status">STOPPED</span></div>
+							<button id="tick-tape-close" type="button" aria-label="Close live tick tape">×</button>
+						</div>
+						<div class="tick-tape-columns" aria-hidden="true"><span>TIME</span><span>PRICE</span><span>SIZE</span></div>
+						<div id="tick-tape-items" class="tick-tape-items" aria-live="polite"></div>
+					</section>
+					<div id="watch-search-wrap" class="watch-search-wrap" hidden>
 						<label class="field-label" for="watch-search">ADD SYMBOL</label>
 						<input id="watch-search" type="search" autocomplete="off" placeholder="Search markets" aria-label="Search symbols to add">
 						<div id="search-results" class="search-results" role="listbox" aria-label="Symbol search results"></div>
 					</div>
+					<div id="watch-items" class="watch-items"></div>
 					<div class="watchlist-foot"><span class="feed-mark"></span><span id="ui-status">HISTORY + LIVE TICKS</span></div>
 				</aside>
 			</div>

@@ -15,7 +15,12 @@ from urllib.request import Request, urlopen
 from lse import LSE
 
 
-API_ROOT = "https://api.londonstrategicedge.com/vault"
+SITE_API_ROOT = "https://api.londonstrategicedge.com"
+CHART_SYMBOL_ALIASES = {
+    "NQ.F": "NASDAQ100.F",
+    "ES.F": "SP500.F",
+    "GC.F": "GOLD.F",
+}
 RESOLUTIONS = {
     "1S": "1s",
     "5S": "5s",
@@ -96,57 +101,57 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
 
     def search(self, params):
         query = params.get("query", [""])[0].strip().casefold()
-        rows = self.load_catalog()
-        matches = [
-            row for row in rows
-            if row.get("dataset") in SUPPORTED_DATASETS
-            and query in str(row.get("symbol", "")).casefold() + " "
-            + str(row.get("name", "")).casefold()
-        ]
-        matches.sort(key=lambda row: (
-            row.get("dataset") != "futures",
-            not str(row.get("symbol", "")).casefold().startswith(query),
-            str(row.get("symbol", "")).casefold(),
-        ))
-        matches = matches[:30]
+        if not query:
+            self.send_json([])
+            return
+        search_aliases = {
+            "nq": "NASDAQ100",
+            "nq.f": "NASDAQ100.F",
+            "es": "SP500",
+            "es.f": "SP500.F",
+            "gc": "GOLD.F",
+            "gc.f": "GOLD.F",
+            "gold": "GOLD.F",
+        }
+        rows = self.site_rpc("site_search", {
+            "q": search_aliases.get(query, query),
+            "lim": 30,
+        })
         self.send_json([
             {
                 "symbol": row.get("symbol", ""),
                 "full_name": row.get("symbol", ""),
-                "description": row.get("name") or row.get("symbol", ""),
-                "exchange": "LSE",
+                "description": row.get("display_name") or row.get("symbol", ""),
+                "exchange": row.get("market") or "",
                 "ticker": row.get("symbol", ""),
-                "type": row.get("dataset", ""),
+                "type": row.get("category", ""),
             }
-            for row in matches
+            for row in rows
+            if row.get("category") in SUPPORTED_DATASETS | {"stock"}
         ])
 
     def symbol_info(self, params):
         symbol = params.get("symbol", [""])[0].strip()
-        row = next(
-            (
-                item for item in self.load_catalog()
-                if item.get("symbol", "").casefold() == symbol.casefold()
-                and item.get("dataset") in SUPPORTED_DATASETS
-            ),
-            None,
-        )
+        row = self.get_symbol_record(symbol)
         if row is None:
             self.send_json({"s": "error", "errmsg": f"Unknown LSE symbol: {symbol}"}, 404)
             return
 
-        is_us_futures = row.get("dataset") == "futures" and row.get("country") == "US"
+        is_us_futures = row.get("category") == "futures" and self.provider_symbol(symbol) in {
+            "NASDAQ100.F", "SP500.F", "GOLD.F",
+        }
+        decimals = int(row.get("decimals") or 2)
         self.send_json({
-            "name": row["symbol"],
-            "ticker": row["symbol"],
-            "description": row.get("name") or row["symbol"],
-            "type": row.get("dataset", ""),
+            "name": symbol,
+            "ticker": symbol,
+            "description": row.get("display_name") or row["symbol"],
+            "type": row.get("category", ""),
             "session": "1700-1600:23456" if is_us_futures else "24x7",
             "timezone": "America/Chicago" if is_us_futures else "Etc/UTC",
-            "exchange": "LSE",
-            "listed_exchange": "LSE",
+            "exchange": row.get("exchange") or row.get("market") or "LSE",
+            "listed_exchange": row.get("market") or "LSE",
             "minmov": 1,
-            "pricescale": 100,
+            "pricescale": 10 ** decimals,
             "has_intraday": True,
             "supported_resolutions": CHART_RESOLUTIONS,
             "has_seconds": True,
@@ -167,8 +172,6 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
 
         from_epoch = int(self.first(params, "from"))
         to_epoch = int(self.first(params, "to"))
-        start = self.epoch_to_iso(from_epoch)
-        end = self.epoch_to_iso(to_epoch, add_day=True)
         try:
             requested_limit = min(max(int(self.first(params, "countback", "1000")), 1), 5000)
         except ValueError:
@@ -201,23 +204,14 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
             self.send_json(result)
             return
 
-        query = urlencode({
-            "symbol": symbol,
-            "timeframe": timeframe,
-            "start": start,
-            "end": end,
-            "order": "desc",
-            "limit": limit,
+        rows = self.site_rpc("site_candles", {
+            "sym": self.provider_symbol(symbol),
+            "width_seconds": str(base_seconds),
+            "n": limit,
+            "before": datetime.fromtimestamp(to_epoch, timezone.utc).isoformat(),
+            "from_ts": None,
+            "to_ts": None,
         })
-        request = Request(
-            f"{API_ROOT}/candles?{query}",
-            headers={
-                "x-api-key": self.api_key,
-                "User-Agent": "LSE-TradingView-local-datafeed/1.0",
-            },
-        )
-        with urlopen(request, timeout=60) as response:
-            rows = json.loads(response.read().decode("utf-8"))
 
         bars = sorted((self.row_to_bar(row) for row in rows), key=lambda bar: bar["time"])
         bars = [bar for bar in bars if bar["time"] <= to_epoch]
@@ -323,11 +317,7 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
 
     def stream(self, params):
         symbol = self.first(params, "symbol").strip()
-        if not any(
-            row.get("symbol", "").casefold() == symbol.casefold()
-            and row.get("dataset") in SUPPORTED_DATASETS
-            for row in self.load_catalog()
-        ):
+        if self.get_symbol_record(symbol) is None:
             self.send_json({"error": f"Unknown LSE symbol: {symbol}"}, 404)
             return
 
@@ -357,18 +347,44 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
         finally:
             self.live_broker.unsubscribe(symbol, subscriber)
 
-    def load_catalog(self):
+    @staticmethod
+    def provider_symbol(symbol):
+        return CHART_SYMBOL_ALIASES.get(symbol.upper(), symbol)
+
+    def get_symbol_record(self, symbol):
+        provider_symbol = self.provider_symbol(symbol)
         if self.catalog is None:
-            request = Request(
-                f"{API_ROOT}/catalog",
-                headers={
-                    "x-api-key": self.api_key,
-                    "User-Agent": "LSE-TradingView-local-datafeed/1.0",
-                },
-            )
-            with urlopen(request, timeout=60) as response:
-                self.catalog = json.loads(response.read().decode("utf-8"))
-        return self.catalog
+            self.catalog = {}
+        if provider_symbol not in self.catalog:
+            params = urlencode({
+                "symbol": f"eq.{provider_symbol}",
+                "is_active": "eq.true",
+                "select": "symbol,display_name,category,market,decimals,tick_size,currency,exchange,country",
+                "limit": 1,
+            })
+            rows = self.site_api_request(f"site_symbols?{params}")
+            self.catalog[provider_symbol] = rows[0] if rows else None
+        return self.catalog[provider_symbol]
+
+    def site_rpc(self, name, payload):
+        return self.site_api_request(f"rpc/{name}", payload=payload)
+
+    @staticmethod
+    def site_api_request(path, payload=None):
+        api_key = os.environ.get("LSE_CHART_API_KEY")
+        if not api_key:
+            raise ValueError("LSE_CHART_API_KEY is not configured")
+        request = Request(
+            f"{SITE_API_ROOT}/{path.lstrip('/')}",
+            data=json.dumps(payload).encode("utf-8") if payload is not None else None,
+            headers={
+                "x-api-key": api_key,
+                "Content-Type": "application/json",
+                "User-Agent": "LSE-TradingView-local-datafeed/1.0",
+            },
+        )
+        with urlopen(request, timeout=60) as response:
+            return json.loads(response.read().decode("utf-8"))
 
     def send_json(self, payload, status=200):
         body = json.dumps(payload).encode("utf-8")
@@ -389,13 +405,6 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
     @staticmethod
     def first(params, key, default=""):
         return params.get(key, [default])[0]
-
-    @staticmethod
-    def epoch_to_iso(value, add_day=False):
-        date = datetime.fromtimestamp(int(value), timezone.utc)
-        if add_day:
-            date += timedelta(days=1)
-        return date.strftime("%Y-%m-%d")
 
     @staticmethod
     def safe_error(error):
