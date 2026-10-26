@@ -13,7 +13,7 @@
 		<link rel="stylesheet" href="dashboard.css?v=20261025-2">
 
 		<script type="text/javascript" src="charting_library/charting_library.standalone.js"></script>
-		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261025-3"></script>
+		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261025-4"></script>
 		<script type="text/javascript" src="datafeeds/hourly-range-bands.js?v=20261024-4"></script>
 
 		<script type="text/javascript">
@@ -47,6 +47,16 @@
 					locale: getParameterByName('lang') || "en",
 					disabled_features: ["use_localstorage_for_settings"],
 					enabled_features: ["study_templates", "seconds_resolution", "custom_resolutions"],
+					favorites: {
+						drawingTools: [
+							"LineToolTrendLine",
+							"LineToolHorzLine",
+							"LineToolHorzRay",
+							"LineToolFibRetracement",
+							"LineToolRectangle",
+							"LineToolText",
+						],
+					},
 					auto_save_delay: 1,
 					custom_indicators_getter: function (PineJS) {
 						return Promise.resolve([window.AverageHourlyRangeBands(PineJS)]);
@@ -323,7 +333,7 @@
 					tickTapeToggle.title = 'Open live tick tape for ' + symbol;
 					tickTapeToggle.setAttribute('aria-label', 'Open live tick tape for ' + symbol);
 					source.onopen = function () {
-						if (tickTapeSource === source) { tickTapeStatus.textContent = 'LIVE'; }
+						if (tickTapeSource === source) { tickTapeStatus.textContent = 'CONNECTED'; }
 					};
 					source.onmessage = function (event) {
 						if (tickTapeSource !== source) { return; }
@@ -337,7 +347,8 @@
 							var row = document.createElement('div');
 							row.className = 'tick-tape-row';
 							var time = document.createElement('time');
-							var date = new Date(Number(tick.timestamp_ms || Number(tick.time) * 1000));
+							var tickTime = Number(tick.timestamp_ms === undefined ? Number(tick.time) * 1000 : tick.timestamp_ms);
+							var date = new Date(tickTime);
 							time.textContent = Number.isNaN(date.getTime()) ? '--:--:--.---' :
 								date.toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
 							var price = document.createElement('span');
@@ -350,7 +361,9 @@
 							while (tickTapeItems.childElementCount > 80) {
 								tickTapeItems.lastElementChild.remove();
 							}
-							tickTapeStatus.textContent = 'LIVE';
+							tickTapeStatus.textContent = Number.isFinite(tickTime) && Date.now() - tickTime > 60 * 1000
+								? 'STALE DATA'
+								: 'LIVE';
 						} catch (error) {
 							tickTapeStatus.textContent = 'INVALID TICK';
 							console.error('Unable to read BTC/USD tick:', error);

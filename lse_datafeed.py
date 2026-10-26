@@ -16,6 +16,7 @@ from lse import LSE
 
 
 SITE_API_ROOT = "https://api.londonstrategicedge.com"
+LIVE_WS_URL = "wss://chicago-ws.londonstrategicedge.com"
 CHART_SYMBOL_ALIASES = {
     "NQ.F": "NASDAQ100.F",
     "ES.F": "SP500.F",
@@ -38,7 +39,6 @@ RESOLUTIONS = {
     "1M": "1mo",
 }
 CHART_RESOLUTIONS = list(RESOLUTIONS)
-LIVE_REPLAY_HOURS = 2
 SUPPORTED_DATASETS = {
     "stocks",
     "fx",
@@ -70,9 +70,21 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
         parsed = urlsplit(self.path)
         params = parse_qs(parsed.query)
 
-        if parsed.path in {"/search", "/symbols", "/history", "/stream"} and not self.api_key:
-            self.send_json({"s": "error", "errmsg": "LSE_API_KEY is not configured for this deployment"}, 503)
-            return
+        if parsed.path in {"/search", "/symbols", "/history", "/stream"}:
+            required_keys = ["LSE_API_KEY"]
+            if parsed.path != "/stream":
+                required_keys.append("LSE_CHART_API_KEY")
+            missing_keys = [
+                name for name in required_keys
+                if not (self.api_key if name == "LSE_API_KEY" else os.environ.get(name))
+            ]
+            if missing_keys:
+                self.send_json({
+                    "s": "error",
+                    "errmsg": "Required environment variable(s) not configured for this deployment: "
+                    + ", ".join(missing_keys),
+                }, 503)
+                return
 
         try:
             if parsed.path == "/config":
@@ -184,12 +196,33 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
         limit = min(requested_limit * aggregation_factor + bars_after_to + 2, 5000)
 
         if resolution.endswith("S"):
-            bars = self.live_broker.history_bars(
-                symbol,
-                int(self.first(params, "from")),
-                int(self.first(params, "to")),
-                int(resolution[:-1]),
-            )[-requested_limit:]
+            interval_seconds = int(resolution[:-1])
+            base_seconds = interval_seconds if interval_seconds in {1, 5, 15, 30} else 1
+            aggregation_factor = interval_seconds // base_seconds
+            rows = self.site_rpc("site_candles", {
+                "sym": self.provider_symbol(symbol),
+                "width_seconds": str(base_seconds),
+                "n": min(requested_limit * aggregation_factor, 5000),
+                "before": datetime.fromtimestamp(to_epoch, timezone.utc).isoformat(),
+                "from_ts": datetime.fromtimestamp(from_epoch, timezone.utc).isoformat(),
+                "to_ts": datetime.fromtimestamp(to_epoch, timezone.utc).isoformat(),
+            })
+            historical_bars = sorted(
+                (self.row_to_bar(row) for row in rows),
+                key=lambda bar: bar["time"],
+            )
+            historical_bars = [
+                bar for bar in historical_bars
+                if from_epoch <= bar["time"] <= to_epoch
+            ]
+            if aggregation_factor > 1:
+                historical_bars = self.aggregate_bars(
+                    historical_bars, interval_seconds
+                )
+            live_bars = self.live_broker.history_bars(
+                symbol, from_epoch, to_epoch, interval_seconds
+            )
+            bars = self.merge_bars(historical_bars, live_bars)[-requested_limit:]
             if not bars:
                 self.send_json({"s": "no_data"})
                 return
@@ -428,6 +461,8 @@ class LiveTickBroker:
         self.feed_symbol_map = {}
         self.client = None
         self.thread = None
+        self.stop_event = threading.Event()
+        self.stream_restart_delay_seconds = 3
         self.tick_history = {}
         self.tick_sequence = 0
         self.default_symbols = {
@@ -435,6 +470,15 @@ class LiveTickBroker:
             "ES.F": ("ES.F", "SP500.F"),
             "GC.F": ("GC.F", "GOLD.F"),
         }
+
+    @staticmethod
+    def upstream_symbol(symbol):
+        return CHART_SYMBOL_ALIASES.get(symbol.upper(), symbol)
+
+    def upstream_symbols(self):
+        return list(dict.fromkeys(
+            self.upstream_symbol(symbol) for symbol in self.requested_symbols
+        ))
 
     def subscribe(self, symbol, start):
         subscriber = queue.Queue()
@@ -445,40 +489,50 @@ class LiveTickBroker:
                     subscriber.put_nowait(tick)
             self.subscribers.setdefault(symbol, set()).add(subscriber)
             if self.client is None:
-                self.client = LSE(api_key=self.api_key)
+                self.client = LSE(api_key=self.api_key, url=LIVE_WS_URL)
                 self.client.on("error", self.publish_error)
-                initial_symbols = list(dict.fromkeys([*self.default_symbols, symbol]))
-                for requested_symbol in initial_symbols:
+                for requested_symbol in dict.fromkeys([*self.default_symbols, symbol]):
                     self.register_symbol(requested_symbol)
-                replay_start = min(
-                    start_time,
-                    int((datetime.now(timezone.utc) - timedelta(hours=LIVE_REPLAY_HOURS)).timestamp()),
-                )
+                initial_symbols = self.upstream_symbols()
                 self.thread = threading.Thread(
                     target=self.run_stream,
                     args=(
                         self.client,
                         initial_symbols,
-                        datetime.fromtimestamp(replay_start, timezone.utc).isoformat(),
                     ),
                     daemon=True,
                 )
                 self.thread.start()
             elif symbol not in self.requested_symbols:
                 self.register_symbol(symbol)
-                self.client.subscribe([symbol])
+                self.client.subscribe([self.upstream_symbol(symbol)])
         return subscriber
 
     def unsubscribe(self, symbol, subscriber):
         with self.lock:
             self.subscribers.get(symbol, set()).discard(subscriber)
 
-    def run_stream(self, client, symbols, start):
-        try:
-            for tick in client.stream(symbols, start=start):
-                self.publish(tick)
-        except Exception as error:
-            self.publish_error(error)
+    def run_stream(self, client, symbols, start=None):
+        while not self.stop_event.is_set():
+            try:
+                for tick in client.stream(symbols, reconnect=False, start=start):
+                    if self.stop_event.is_set():
+                        return
+                    self.publish(tick)
+            except Exception as error:
+                self.publish_error(error)
+
+            start = None
+            if self.stop_event.wait(self.stream_restart_delay_seconds):
+                return
+
+            with self.lock:
+                if self.client is not client:
+                    return
+                client = LSE(api_key=self.api_key, url=LIVE_WS_URL)
+                client.on("error", self.publish_error)
+                self.client = client
+                symbols = self.upstream_symbols()
 
     def register_symbol(self, symbol):
         self.requested_symbols.add(symbol)

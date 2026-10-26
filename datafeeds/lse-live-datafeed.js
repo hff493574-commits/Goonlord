@@ -4,6 +4,7 @@
 	var supportedResolutions = ["1S", "5S", "15S", "30S", "1", "3", "5", "15", "30", "60", "240", "1D", "1W", "1M"];
 	var streamCloseDelay = 1000;
 	var maxCachedTicksPerSymbol = 150000;
+	var secondsReplayLookbackMs = 2 * 60 * 60 * 1000;
 
 	function resolutionDurationMs(resolution) {
 		var seconds = /^(\d+)S$/.exec(resolution);
@@ -118,13 +119,14 @@
 		if (!state) {
 			state = {
 				currentBar: this.lastBars.get(key) || null,
-				lastTickTime: currentTickCursor(),
+				lastTickTime: initialTickCursor(resolution),
 				lastTickSequence: -1,
 				symbol: symbolInfo.ticker,
 				key: key,
 				duration: resolutionDurationMs(resolution),
 			};
 			this.barStates.set(key, state);
+			this.replayCachedTicks(state);
 		}
 		this.subscriptions.set(listenerGuid, {
 			symbol: symbolInfo.ticker,
@@ -322,6 +324,12 @@
 
 	function currentTickCursor() {
 		return Date.now() - 1;
+	}
+
+	function initialTickCursor(resolution) {
+		return /^(\d+)S$/.test(resolution)
+			? Date.now() - secondsReplayLookbackMs
+			: currentTickCursor();
 	}
 
 	function replayCursor(lastBarTime) {

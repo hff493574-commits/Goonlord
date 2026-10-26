@@ -10,3 +10,5 @@ services:
     envVars:
       - key: LSE_API_KEY
         sync: false
+      - key: LSE_CHART_API_KEY
+        sync: false
