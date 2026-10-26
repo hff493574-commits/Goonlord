@@ -85,3 +85,29 @@ test("replays browser-cached ticks when switching to seconds on an open stream",
 	assert.equal(bars[0].time, fixedNow - 10_000);
 	assert.equal(bars[0].close, replayTick.price);
 });
+
+test("keeps the latest market price from regressing on older replay ticks", () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const prices = [];
+	datafeed.subscribePriceUpdates((_symbol, price) => prices.push(price));
+	datafeed.subscribeBars({ ticker: "NQ.F" }, "1", () => {}, "price-listener");
+	const stream = eventSources.at(-1);
+
+	stream.onmessage({ data: JSON.stringify({
+		time: fixedNow / 1000 - 5,
+		timestamp_ms: fixedNow - 5_000,
+		sequence: 2,
+		price: 20005,
+		volume: 1,
+	}) });
+	stream.onmessage({ data: JSON.stringify({
+		time: fixedNow / 1000 - 20,
+		timestamp_ms: fixedNow - 20_000,
+		sequence: 1,
+		price: 20000,
+		volume: 1,
+	}) });
+
+	assert.equal(datafeed.getLastPrice("NQ.F"), 20005);
+	assert.deepEqual(prices, [20005]);
+});

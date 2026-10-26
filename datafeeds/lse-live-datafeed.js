@@ -23,6 +23,9 @@
 		this.lastBars = new Map();
 		this.barStates = new Map();
 		this.tickHistory = new Map();
+		this.lastPrices = new Map();
+		this.lastPriceTimes = new Map();
+		this.priceListeners = new Set();
 	}
 
 	LSELiveDatafeed.prototype.onReady = function (callback) {
@@ -84,8 +87,10 @@
 					};
 				});
 				if (bars.length) {
+					var latestBar = bars[bars.length - 1];
+					this.setLatestPrice(symbolInfo.ticker, latestBar.close, latestBar.time);
 					var key = this.barKey(symbolInfo.ticker, resolution);
-					var lastBar = bars[bars.length - 1];
+					var lastBar = latestBar;
 					this.lastBars.set(key, lastBar);
 					var state = this.barStates.get(key);
 					if (!state || !state.currentBar || lastBar.time > state.currentBar.time) {
@@ -190,6 +195,8 @@
 				return;
 			}
 			this.cacheTick(symbol, tick);
+			var tickTime = Number(tick.timestamp_ms) || Number(tick.time) * 1000;
+			this.setLatestPrice(symbol, Number(tick.price), tickTime);
 			var activeKeys = new Set();
 			this.subscriptions.forEach(function (subscription) {
 				if (subscription.symbol === symbol) { activeKeys.add(subscription.key); }
@@ -320,6 +327,29 @@
 
 	LSELiveDatafeed.prototype.barKey = function (symbol, resolution) {
 		return symbol + ":" + resolution;
+	};
+
+	LSELiveDatafeed.prototype.getLastPrice = function (symbol) {
+		return this.lastPrices.get(symbol);
+	};
+
+	LSELiveDatafeed.prototype.setLatestPrice = function (symbol, price, time) {
+		if (!Number.isFinite(price) || !Number.isFinite(time)) { return false; }
+		var previousTime = this.lastPriceTimes.get(symbol);
+		if (previousTime !== undefined && time < previousTime) { return false; }
+		this.lastPrices.set(symbol, price);
+		this.lastPriceTimes.set(symbol, time);
+		this.priceListeners.forEach(function (listener) {
+			listener(symbol, price);
+		});
+		return true;
+	};
+
+	LSELiveDatafeed.prototype.subscribePriceUpdates = function (listener) {
+		this.priceListeners.add(listener);
+		return function () {
+			this.priceListeners.delete(listener);
+		}.bind(this);
 	};
 
 	function currentTickCursor() {

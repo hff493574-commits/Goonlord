@@ -10,10 +10,11 @@
 		<link rel="preconnect" href="https://fonts.googleapis.com">
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-		<link rel="stylesheet" href="dashboard.css?v=20261025-2">
+		<link rel="stylesheet" href="dashboard.css?v=20261026-1">
 
 		<script type="text/javascript" src="charting_library/charting_library.standalone.js"></script>
-		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261025-4"></script>
+		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261025-5"></script>
+		<script type="text/javascript" src="datafeeds/paper-broker.js?v=20261026-1"></script>
 		<script type="text/javascript" src="datafeeds/hourly-range-bands.js?v=20261024-4"></script>
 
 		<script type="text/javascript">
@@ -35,6 +36,8 @@
 				document.documentElement.dataset.theme = initialTheme;
 				themeSelect.value = initialTheme;
 
+				var chartDatafeed = new LSELiveDatafeed(datafeedUrl);
+				var paperBroker = new LSEPaperBroker(null, chartDatafeed);
 				var widget = window.tvWidget = new TradingView.widget({
 					fullscreen: false,
 					autosize: true,
@@ -42,11 +45,15 @@
 					interval: '1',
 					timezone: 'America/New_York',
 					container: "tv_chart_container",
-					datafeed: new LSELiveDatafeed(datafeedUrl),
+					datafeed: chartDatafeed,
 					library_path: "charting_library/",
 					locale: getParameterByName('lang') || "en",
 					disabled_features: ["use_localstorage_for_settings"],
-					enabled_features: ["study_templates", "seconds_resolution", "custom_resolutions"],
+					enabled_features: [
+						"study_templates",
+						"seconds_resolution",
+						"custom_resolutions",
+					],
 					favorites: {
 						drawingTools: [
 							"LineToolTrendLine",
@@ -92,6 +99,22 @@
 				window.addEventListener('pagehide', saveChartLayout);
 
 				var activeSymbol = 'NQ.F';
+				var executionMarkers = new Map();
+				var executionMarksStorageKey = 'lse-paper-execution-marks';
+				var executionMarksVisible = localStorage.getItem(executionMarksStorageKey) !== 'false';
+				var paperPositions = document.getElementById('paper-positions');
+				var paperExecutions = document.getElementById('paper-executions');
+				var paperStatus = document.getElementById('paper-status');
+				var paperBalance = document.getElementById('paper-balance');
+				var paperEquity = document.getElementById('paper-equity');
+				var paperUnrealized = document.getElementById('paper-unrealized');
+				var paperQuantity = document.getElementById('paper-quantity');
+				var paperTradingPanel = document.getElementById('paper-trading-panel');
+				var paperTradingToggle = document.getElementById('paper-trading-toggle');
+				var executionMarksToggle = document.getElementById('paper-execution-marks');
+				executionMarksToggle.checked = executionMarksVisible;
+				var unsubscribePaperAccount;
+				var paperSnapshot;
 				var watchItems = document.getElementById('watch-items');
 				var searchInput = document.getElementById('watch-search');
 				var searchResults = document.getElementById('search-results');
@@ -144,8 +167,194 @@
 					return symbol.replace(/\.F$/i, '');
 				}
 
+				function formatPaperNumber(value, digits) {
+					return Number(value).toLocaleString('en-US', {
+						minimumFractionDigits: 0,
+						maximumFractionDigits: digits === undefined ? 2 : digits,
+					});
+				}
+
+				function renderPaperAccount(snapshot) {
+					paperBalance.textContent = '$' + formatPaperNumber(snapshot.balance);
+					paperEquity.textContent = '$' + formatPaperNumber(snapshot.equity);
+					paperUnrealized.textContent = (snapshot.unrealized >= 0 ? '+' : '−') +
+						'$' + formatPaperNumber(Math.abs(snapshot.unrealized));
+					paperUnrealized.classList.toggle('is-negative', snapshot.unrealized < 0);
+					paperUnrealized.classList.toggle('is-positive', snapshot.unrealized >= 0);
+
+					paperPositions.replaceChildren();
+					var visiblePositions = snapshot.positions;
+					if (!visiblePositions.length) {
+						var empty = document.createElement('p');
+						empty.className = 'paper-empty';
+						empty.textContent = 'No open paper positions';
+						paperPositions.append(empty);
+					}
+					visiblePositions.forEach(function (position) {
+						var row = document.createElement('div');
+						row.className = 'paper-position-row';
+						var details = document.createElement('div');
+						details.className = 'paper-position-details';
+						var heading = document.createElement('strong');
+						heading.textContent = (position.qty > 0 ? 'LONG ' : 'SHORT ') +
+							formatPaperNumber(Math.abs(position.qty), 0) + ' ' + displaySymbol(position.symbol);
+						var prices = document.createElement('span');
+						prices.textContent = 'AVG ' + formatPaperNumber(position.avgPrice) +
+							(position.markPrice === null ? ' · WAITING FOR PRICE' :
+								' · LAST ' + formatPaperNumber(position.markPrice));
+						var pnl = document.createElement('b');
+						pnl.className = position.unrealized < 0 ? 'is-negative' : 'is-positive';
+						pnl.textContent = (position.unrealized >= 0 ? '+' : '−') +
+							'$' + formatPaperNumber(Math.abs(position.unrealized));
+						var close = document.createElement('button');
+						close.type = 'button';
+						close.className = 'paper-close-position';
+						close.textContent = 'CLOSE';
+						close.addEventListener('click', function () {
+							close.disabled = true;
+							paperBroker.closePosition(position.symbol)
+								.then(function () { paperStatus.textContent = 'Position closed at market'; })
+								.catch(showPaperError)
+								.finally(function () { close.disabled = false; });
+						});
+						details.append(heading, prices);
+						row.append(details, pnl, close);
+						paperPositions.append(row);
+					});
+
+					paperExecutions.replaceChildren();
+					var executions = snapshot.history.slice(0, 8);
+					if (!executions.length) {
+						var noExecutions = document.createElement('p');
+						noExecutions.className = 'paper-empty';
+						noExecutions.textContent = 'No fills for this symbol yet';
+						paperExecutions.append(noExecutions);
+					}
+					executions.forEach(function (execution) {
+						var item = document.createElement('div');
+						item.className = 'paper-execution-row';
+						var time = document.createElement('time');
+						time.textContent = new Date(execution.updateTime).toLocaleTimeString([], {
+							hour: '2-digit', minute: '2-digit', second: '2-digit',
+						});
+						var sideLabel = document.createElement('strong');
+						sideLabel.className = execution.side === 1 ? 'is-positive' : 'is-negative';
+						sideLabel.textContent = execution.side === 1 ? 'BUY' : 'SELL';
+						var symbol = document.createElement('span');
+						symbol.className = 'paper-execution-symbol';
+						symbol.textContent = displaySymbol(execution.symbol);
+						var fill = document.createElement('span');
+						fill.textContent = formatPaperNumber(execution.qty, 0) + ' @ ' +
+							formatPaperNumber(execution.avgPrice);
+						item.append(time, symbol, sideLabel, fill);
+						paperExecutions.append(item);
+					});
+				}
+
+				function showPaperError(error) {
+					paperStatus.textContent = error && error.message ? error.message : 'Paper order failed';
+					console.error('Paper trading:', error);
+				}
+
+				function clearExecutionMarkers() {
+					var chart = widget.activeChart();
+					executionMarkers.forEach(function (marker) {
+						if (marker.id !== null) { chart.removeEntity(marker.id); }
+					});
+					executionMarkers.clear();
+				}
+
+				function executionMarkerPrice(execution) {
+					var ticks = {
+						'NQ.F': 0.25, 'NASDAQ100.F': 0.25,
+						'ES.F': 0.25, 'SP500.F': 0.25,
+						'GC.F': 0.1, 'GOLD.F': 0.1,
+					};
+					var tick = ticks[execution.symbol.toUpperCase()] || 0.01;
+					return execution.avgPrice + (execution.side === 1 ? -tick * 3 : tick * 3);
+				}
+
+				function drawExecutionMarkers(history, symbol) {
+					if (!executionMarksVisible || symbol !== activeSymbol) { return; }
+					var chart = widget.activeChart();
+					history.filter(function (execution) {
+						return execution.symbol === symbol;
+					}).slice(0, 100).reverse().forEach(function (execution) {
+						var markerKey = execution.id + ':' + execution.symbol;
+						if (executionMarkers.has(markerKey)) { return; }
+						var marker = { id: null };
+						executionMarkers.set(markerKey, marker);
+						chart.createShape({
+							time: execution.updateTime / 1000,
+							price: executionMarkerPrice(execution),
+						}, {
+							shape: execution.side === 1 ? 'arrow_up' : 'arrow_down',
+							overrides: {
+								'linetoolarrow.linecolor': execution.side === 1 ? '#089981' : '#f23645',
+								'linetoolarrow.linewidth': 1,
+							},
+							lock: true,
+							disableSelection: true,
+							disableSave: true,
+							showInObjectsTree: false,
+						}).then(function (entityId) {
+							if (executionMarkers.get(markerKey) !== marker ||
+								!executionMarksVisible || activeSymbol !== symbol) {
+								chart.removeEntity(entityId);
+								return;
+							}
+							marker.id = entityId;
+						}).catch(function (error) {
+							executionMarkers.delete(markerKey);
+							console.warn('Unable to draw paper execution marker:', error);
+						});
+					});
+				}
+
+				function placePaperOrder(side) {
+					var quantity = Number(paperQuantity.value);
+					if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) {
+						paperStatus.textContent = 'Quantity must be a whole number from 1 to 1,000';
+						return;
+					}
+					var buttons = paperTradingPanel.querySelectorAll('[data-order-side]');
+					buttons.forEach(function (button) { button.disabled = true; });
+					paperStatus.textContent = 'Filling simulated market order…';
+					paperBroker.placeOrder({
+						symbol: activeSymbol,
+						type: 2,
+						side: side,
+						qty: quantity,
+					}).then(function () {
+						paperStatus.textContent = 'Paper order filled · simulated only';
+					}).catch(showPaperError).finally(function () {
+						buttons.forEach(function (button) { button.disabled = false; });
+					});
+				}
+
+				paperTradingPanel.querySelectorAll('[data-order-side]').forEach(function (button) {
+					button.addEventListener('click', function () {
+						placePaperOrder(Number(button.dataset.orderSide));
+					});
+				});
+				paperTradingToggle.addEventListener('click', function () {
+					var collapsed = paperTradingPanel.classList.toggle('is-collapsed');
+					paperTradingToggle.setAttribute('aria-expanded', String(!collapsed));
+					paperTradingToggle.textContent = collapsed ? 'SHOW' : 'HIDE';
+				});
+				executionMarksToggle.addEventListener('change', function () {
+					executionMarksVisible = executionMarksToggle.checked;
+					localStorage.setItem(executionMarksStorageKey, String(executionMarksVisible));
+					if (executionMarksVisible && paperSnapshot) {
+						drawExecutionMarkers(paperSnapshot.history, activeSymbol);
+					} else {
+						clearExecutionMarkers();
+					}
+				});
+
 				function updateSymbol(symbol) {
 					activeSymbol = symbol;
+					document.getElementById('paper-active-symbol').textContent = 'ORDER ' + displaySymbol(symbol);
 					watchItems.querySelectorAll('[data-symbol]').forEach(function (button) {
 						var active = button.dataset.symbol === symbol;
 						button.classList.toggle('is-active', active);
@@ -500,8 +709,13 @@
 					widget.subscribe('onAutoSaveNeeded', saveChartLayout);
 					chart.onSymbolChanged().subscribe(null, function (info) {
 						var symbol = info.ticker || info.name;
+						clearExecutionMarkers();
 						updateSymbol(symbol);
 						if (!tickTape.hidden) { startTickTape(symbol); }
+						if (paperSnapshot) {
+							renderPaperAccount(paperSnapshot);
+							drawExecutionMarkers(paperSnapshot.history, symbol);
+						}
 					});
 					chart.onDataLoaded().subscribe(null, function () {
 						var previousNames = [
@@ -528,8 +742,19 @@
 					} catch (error) {
 						console.error('Unable to restore saved chart layout:', error);
 					}
+					activeSymbol = chart.symbol();
+					updateSymbol(activeSymbol);
+					unsubscribePaperAccount = paperBroker.subscribeAccount(function (snapshot) {
+						paperSnapshot = snapshot;
+						renderPaperAccount(snapshot);
+						drawExecutionMarkers(snapshot.history, activeSymbol);
+					});
 					chartLayoutReady = true;
 					renderWatchlist();
+				});
+				window.addEventListener('pagehide', function () {
+					clearExecutionMarkers();
+					if (unsubscribePaperAccount) { unsubscribePaperAccount(); }
 				});
 
 			};
@@ -544,6 +769,46 @@
 			<div class="terminal-grid">
 				<main class="chart-workspace">
 					<div class="chart-frame"><div id="tv_chart_container"></div></div>
+					<section id="paper-trading-panel" class="paper-trading-panel" aria-label="Paper trading">
+						<div class="paper-panel-heading">
+							<div class="paper-panel-title">
+								<span class="feed-mark"></span>
+								<h2>Paper Trading</h2>
+								<span class="paper-simulated-label">SIMULATED</span>
+							</div>
+							<div class="paper-panel-actions">
+								<label class="paper-mark-toggle" for="paper-execution-marks">
+									<input id="paper-execution-marks" type="checkbox">
+									<span>FILL MARKS</span>
+								</label>
+								<button id="paper-trading-toggle" class="paper-collapse-button" type="button" aria-expanded="true" aria-controls="paper-trading-content">HIDE</button>
+							</div>
+						</div>
+						<div id="paper-trading-content" class="paper-trading-content">
+							<div class="paper-account-summary" aria-label="Paper account summary">
+								<div><span>Balance</span><strong id="paper-balance">$100,000.00</strong></div>
+								<div><span>Equity</span><strong id="paper-equity">$100,000.00</strong></div>
+								<div><span>Unrealized P&amp;L</span><strong id="paper-unrealized" class="is-positive">$0.00</strong></div>
+							</div>
+							<div class="paper-trade-controls">
+								<label for="paper-quantity">QTY</label>
+								<input id="paper-quantity" type="number" min="1" max="1000" step="1" value="1" inputmode="numeric">
+								<button type="button" class="paper-order-button paper-buy-button" data-order-side="1">BUY MARKET</button>
+								<button type="button" class="paper-order-button paper-sell-button" data-order-side="-1">SELL MARKET</button>
+								<span id="paper-status" role="status" aria-live="polite">Paper account ready · orders are simulated</span>
+							</div>
+							<div class="paper-data-columns">
+								<section class="paper-data-section" aria-label="Open paper positions">
+									<h3>OPEN POSITIONS <span id="paper-active-symbol"></span></h3>
+									<div id="paper-positions" class="paper-positions"><p class="paper-empty">Loading paper account…</p></div>
+								</section>
+								<section class="paper-data-section paper-execution-section" aria-label="Recent paper executions">
+									<h3>RECENT FILLS</h3>
+									<div id="paper-executions" class="paper-executions"><p class="paper-empty">Loading paper account…</p></div>
+								</section>
+							</div>
+						</div>
+					</section>
 				</main>
 				<aside class="watchlist-panel" aria-label="Watchlist">
 					<div class="watchlist-tools">
