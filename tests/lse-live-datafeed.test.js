@@ -8,6 +8,7 @@ const vm = require("node:vm");
 
 const fixedNow = Date.parse("2026-10-25T13:00:00Z");
 const eventSources = [];
+const historyRequests = [];
 let historyPayload;
 class FixedDate extends Date {
 	constructor(...args) {
@@ -37,7 +38,10 @@ vm.runInNewContext(
 		URLSearchParams,
 		setTimeout,
 		clearTimeout,
-		fetch: () => Promise.resolve({ json: () => Promise.resolve(historyPayload) }),
+		fetch: (url) => {
+			historyRequests.push(new URL(url));
+			return Promise.resolve({ json: () => Promise.resolve(historyPayload) });
+		},
 		console,
 	},
 );
@@ -88,6 +92,169 @@ test("history reconciliation keeps the historical open when live ticks arrived f
 		{ open: result[0].open, high: result[0].high, low: result[0].low, close: result[0].close },
 		{ open: 20000, high: 20025, low: 19990, close: 20020 },
 	);
+});
+
+test("RTH mode keeps only US equity regular-session intraday bars", async () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const client = datafeed.createClient(4);
+	client.setRegularHoursEnabled(true);
+	historyPayload = {
+		s: "ok",
+		t: [
+			Date.parse("2026-10-26T13:00:00Z") / 1000,
+			Date.parse("2026-10-26T13:30:00Z") / 1000,
+			Date.parse("2026-10-26T20:15:00Z") / 1000,
+		],
+		o: [1, 2, 3],
+		h: [1, 2, 3],
+		l: [1, 2, 3],
+		c: [1, 2, 3],
+		v: [1, 1, 1],
+	};
+
+	const result = await new Promise((resolve, reject) => {
+		client.getBars(
+			{ ticker: "NQ.F" },
+			"60",
+			{ from: 0, to: fixedNow / 1000 + 1, countBack: 10 },
+			(bars) => resolve(bars),
+			reject,
+		);
+	});
+
+	assert.equal(result.length, 1);
+	assert.equal(result[0].time, Date.parse("2026-10-26T13:30:00Z"));
+	client.setRegularHoursEnabled(false);
+	const extendedBars = await new Promise((resolve, reject) => {
+		client.getBars(
+			{ ticker: "NQ.F" },
+			"60",
+			{ from: 0, to: fixedNow / 1000 + 1, countBack: 10 },
+			(bars) => resolve(bars),
+			reject,
+		);
+	});
+	assert.equal(extendedBars.length, 3);
+});
+
+test("RTH history requests enough bars to reach the previous regular session", async () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const client = datafeed.createClient(40);
+	client.setRegularHoursEnabled(true);
+	historyPayload = {
+		s: "ok",
+		t: [
+			Date.parse("2026-10-26T13:30:00Z") / 1000,
+			Date.parse("2026-10-27T09:30:00Z") / 1000,
+			Date.parse("2026-10-27T10:30:00Z") / 1000,
+			Date.parse("2026-10-27T11:00:00Z") / 1000,
+		],
+		o: [1, 2, 3, 4],
+		h: [1, 2, 3, 4],
+		l: [1, 2, 3, 4],
+		c: [1, 2, 3, 4],
+		v: [1, 1, 1, 1],
+	};
+
+	const beforeOpen = Date.parse("2026-10-27T11:22:00Z");
+	const result = await new Promise((resolve, reject) => {
+		client.getBars(
+			{ ticker: "NQ.F" },
+			"1",
+			{ from: beforeOpen / 1000 - 3600, to: beforeOpen / 1000, countBack: 10 },
+			(bars) => resolve(bars),
+			reject,
+		);
+	});
+
+	assert.equal(result.length, 1);
+	assert.equal(result[0].time, Date.parse("2026-10-26T13:30:00Z"));
+	assert.equal(historyRequests.at(-1).searchParams.get("countback"), "2402");
+	assert.ok(Number(historyRequests.at(-1).searchParams.get("from")) < beforeOpen / 1000 - 3600);
+});
+
+test("RTH live candles align to the 09:30 New York session open across DST", () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const daylightState = {
+		currentBar: null,
+		lastTickTime: 0,
+		lastTickSequence: -1,
+		symbol: "NQ.F",
+		key: "NQ.F:60:RTH",
+		duration: 60 * 60 * 1000,
+		intraday: true,
+		sessionMode: "RTH",
+	};
+
+	assert.equal(datafeed.applyTick(daylightState, daylightState.duration, {
+		timestamp_ms: Date.parse("2026-10-26T13:00:00Z"),
+		sequence: 1,
+		price: 20000,
+		volume: 1,
+	}), null);
+	const daylightBar = datafeed.applyTick(daylightState, daylightState.duration, {
+		timestamp_ms: Date.parse("2026-10-26T13:35:00Z"),
+		sequence: 2,
+		price: 20001,
+		volume: 1,
+	});
+
+	assert.equal(daylightBar.time, Date.parse("2026-10-26T13:30:00Z"));
+
+	const standardState = { ...daylightState, currentBar: null, lastTickTime: 0, lastTickSequence: -1 };
+	const standardBar = datafeed.applyTick(standardState, standardState.duration, {
+		timestamp_ms: Date.parse("2026-01-05T14:30:00Z"),
+		sequence: 1,
+		price: 20002,
+		volume: 1,
+	});
+
+	assert.equal(standardBar.time, Date.parse("2026-01-05T14:30:00Z"));
+});
+
+test("RTH subscriptions freeze out of session and resume on the next 09:30 ET tick", () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const client = datafeed.createClient(19);
+	const bars = [];
+	let cacheResetCount = 0;
+	client.subscribeBars(
+		{ ticker: "RTH-TEST.F" },
+		"60",
+		(bar) => bars.push(bar),
+		"rth-listener",
+		() => { cacheResetCount += 1; },
+	);
+	client.setRegularHoursEnabled(true);
+	assert.equal(cacheResetCount, 1);
+
+	const stream = eventSources.at(-1);
+	stream.onmessage({ data: JSON.stringify({
+		timestamp_ms: Date.parse("2026-10-26T13:30:00Z"),
+		sequence: 1,
+		price: 20000,
+		volume: 1,
+	}) });
+	assert.equal(bars.length, 1);
+	const closingBar = bars[0];
+
+	stream.onmessage({ data: JSON.stringify({
+		timestamp_ms: Date.parse("2026-10-26T20:01:00Z"),
+		sequence: 2,
+		price: 21000,
+		volume: 1,
+	}) });
+	assert.equal(bars.length, 1);
+	assert.deepEqual(bars[0], closingBar);
+
+	stream.onmessage({ data: JSON.stringify({
+		timestamp_ms: Date.parse("2026-10-27T13:30:00Z"),
+		sequence: 3,
+		price: 20010,
+		volume: 1,
+	}) });
+	assert.equal(bars.length, 2);
+	assert.equal(bars[1].time, Date.parse("2026-10-27T13:30:00Z"));
+	assert.equal(bars[1].open, 20010);
 });
 
 test("starts a fresh seconds subscription at the beginning of the server replay window", () => {

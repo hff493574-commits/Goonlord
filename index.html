@@ -48,6 +48,7 @@
 				var canvasTabs = document.getElementById('canvas-tabs');
 				var addCanvasButton = document.getElementById('add-canvas');
 				var addChartButton = document.getElementById('add-chart-window');
+				var rthToggleButton = document.getElementById('rth-toggle');
 				var commandPalette = document.getElementById('command-palette');
 				var commandInput = document.getElementById('command-palette-input');
 				var commandResults = document.getElementById('command-palette-results');
@@ -55,6 +56,7 @@
 				var watchlistPanel = document.querySelector('.watchlist-panel');
 				var watchlistToggle = document.getElementById('watchlist-toggle');
 				var chartWidgets = [];
+				var chartDatafeedClients = [];
 				var calendarAppWindow = null;
 				var readyChartIndexes = new Set();
 				var pendingSymbols = new Map();
@@ -98,6 +100,9 @@
 								watchlistRect: canvas.watchlistRect && typeof canvas.watchlistRect === 'object' ?
 									canvas.watchlistRect : null,
 								watchlistMinimized: Boolean(canvas.watchlistMinimized),
+								rthCharts: Array.isArray(canvas.rthCharts) ? canvas.rthCharts.filter(function (index) {
+									return Number.isInteger(index) && index >= 0 && index < maxChartWindows;
+								}) : [],
 							};
 						});
 						activeCanvasId = workspaceCanvases.some(function (canvas) {
@@ -130,6 +135,7 @@
 							watchlistOpen: false,
 							watchlistRect: null,
 							watchlistMinimized: false,
+							rthCharts: [],
 						}];
 					}
 				} catch (error) {
@@ -141,6 +147,7 @@
 						rects: chartWindowRects, minimized: minimizedChartIndexes,
 						toolbar: visibleChartIndexes.length ? visibleChartIndexes[0] : -1, calendarOpen: false,
 						watchlistOpen: false, watchlistRect: null, watchlistMinimized: false,
+						rthCharts: [],
 					}];
 				}
 				var initialCanvas = workspaceCanvases.find(function (canvas) { return canvas.id === activeCanvasId; });
@@ -385,6 +392,10 @@
 					}
 					canvas.watchlistMinimized = canvas.watchlistOpen &&
 						watchlistPanel.classList.contains('is-minimized');
+					canvas.rthCharts = visibleChartIndexes.filter(function (index) {
+						return chartDatafeedClients[index] &&
+							chartDatafeedClients[index].isRegularHoursEnabled();
+					});
 				}
 
 				function switchCanvas(canvasId) {
@@ -403,9 +414,14 @@
 						(visibleChartIndexes.length ? visibleChartIndexes[0] : -1);
 					chartGrid = canvasGrid(canvas);
 					chartGrid.hidden = false;
+					visibleChartIndexes.forEach(function (index) { ensureChartWidget(index); });
+					canvas.rthCharts.forEach(function (index) {
+						if (chartDatafeedClients[index]) {
+							chartDatafeedClients[index].setRegularHoursEnabled(true);
+						}
+					});
 					restoreWatchlistCanvasState(canvas);
 					calendarAppWindow = chartGrid.querySelector('.calendar-app-window');
-					visibleChartIndexes.forEach(function (index) { ensureChartWidget(index); });
 					activeWidgetIndex = -1;
 					if (visibleChartIndexes.length) { setChartWindowActive(visibleChartIndexes[0]); }
 					else { setActiveChartWidget(-1); }
@@ -421,6 +437,7 @@
 						name: 'Canvas ' + (workspaceCanvases.length + 1),
 						open: [], rects: {}, minimized: [], toolbar: -1, calendarOpen: false,
 						watchlistOpen: false, watchlistRect: null, watchlistMinimized: false,
+						rthCharts: [],
 					};
 					nextCanvasId += 1;
 					workspaceCanvases.push(canvas);
@@ -462,6 +479,7 @@
 						activeWidgetIndex = -1;
 						widget = null;
 						window.tvWidget = null;
+						updateRthToggle();
 						updateChartSelectors();
 						return;
 					}
@@ -477,6 +495,30 @@
 						activeSymbol = defaultChartSymbols[index];
 						updateSymbol(activeSymbol);
 					}
+					updateRthToggle();
+				}
+
+				function updateRthToggle() {
+					var enabled = activeWidgetIndex >= 0 && chartDatafeedClients[activeWidgetIndex] &&
+						chartDatafeedClients[activeWidgetIndex].isRegularHoursEnabled();
+					rthToggleButton.setAttribute('aria-pressed', String(Boolean(enabled)));
+					rthToggleButton.setAttribute('aria-label', enabled ? 'Use extended trading hours' : 'Use regular trading hours');
+					rthToggleButton.title = enabled
+						? 'RTH enabled · click to show ETH (09:30–16:00 New York)'
+						: 'RTH off · click to show RTH (09:30–16:00 New York)';
+				}
+
+				function toggleActiveChartRth() {
+					var datafeedClient = chartDatafeedClients[activeWidgetIndex];
+					var activeChart = widget && widget.activeChart();
+					if (!datafeedClient || !activeChart) {
+						document.getElementById('chart-layout-status').textContent = 'OPEN A CHART TO CHANGE SESSION';
+						return;
+					}
+					datafeedClient.setRegularHoursEnabled(!datafeedClient.isRegularHoursEnabled());
+					updateRthToggle();
+					activeChart.resetData();
+					saveChartDesktop();
 				}
 
 				var drawingSyncInProgress = 0;
@@ -1053,10 +1095,15 @@
 				function ensureChartWidget(index) {
 					if (chartWidgets[index]) { return; }
 					var containerId = createChartCell(index);
+					var datafeedClient = chartDatafeed.createClient(index);
+					chartDatafeedClients[index] = datafeedClient;
+					if ((activeCanvas().rthCharts || []).includes(index)) {
+						datafeedClient.setRegularHoursEnabled(true);
+					}
 					var options = Object.assign({}, widgetOptions, {
 						container: containerId,
 						symbol: defaultChartSymbols[index % defaultChartSymbols.length],
-						datafeed: chartDatafeed.createClient(index),
+						datafeed: datafeedClient,
 					});
 					if (index !== toolbarChartIndex) {
 						options.disabled_features = ["use_localstorage_for_settings", "header_widget", "left_toolbar"];
@@ -1661,6 +1708,8 @@
 				chartGrid.hidden = false;
 				restoreWatchlistCanvasState(initialCanvas);
 				addChartButton.addEventListener('click', function () { addChartWindow(); });
+				rthToggleButton.addEventListener('click', toggleActiveChartRth);
+				updateRthToggle();
 				watchlistToggle.addEventListener('click', function () {
 					setWatchlistOpen(watchlistPanel.hidden || watchlistPanel.classList.contains('is-minimized'));
 				});
@@ -1907,6 +1956,7 @@
 				<main class="chart-workspace">
 					<div class="chart-layout-bar" aria-label="Chart layout controls">
 						<button id="add-chart-window" class="workspace-action-button" type="button" aria-label="Add chart" title="Add chart"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span>CHART</span></button>
+						<button id="rth-toggle" class="workspace-action-button" type="button" aria-label="Use regular trading hours" title="RTH off · click to show RTH (09:30–16:00 New York)" aria-pressed="false"><span>RTH ADJ</span></button>
 						<button id="watchlist-toggle" class="workspace-action-button" type="button" aria-label="Open watchlist" title="Open watchlist app" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 7.5h10M3 11.5h6"/><circle cx="11.5" cy="11.5" r="1.5"/></svg><span>WATCHLIST</span></button>
 						<button id="command-palette-toggle" class="workspace-action-button command-open-button" type="button" aria-label="Open command palette" title="Command palette (/)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4-3 4 3 4m4-8 3 4-3 4"/></svg><span>COMMAND</span><kbd>/</kbd></button>
 						<div id="canvas-tabs" class="canvas-tabs" aria-label="Workspace canvases">

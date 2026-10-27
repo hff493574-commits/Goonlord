@@ -5,6 +5,80 @@
 	var streamCloseDelay = 1000;
 	var maxCachedTicksPerSymbol = 150000;
 	var secondsReplayLookbackMs = 2 * 60 * 60 * 1000;
+	var regularHoursFormatter = new Intl.DateTimeFormat("en-US", {
+		timeZone: "America/New_York",
+		weekday: "short",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		hourCycle: "h23",
+	});
+	var sessionDateFormatter = new Intl.DateTimeFormat("en-US", {
+		timeZone: "America/New_York",
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+		hour: "2-digit",
+		minute: "2-digit",
+		hourCycle: "h23",
+	});
+
+	function isRegularHours(timestamp) {
+		var parts = regularHoursFormatter.formatToParts(new Date(timestamp));
+		var values = {};
+		parts.forEach(function (part) { values[part.type] = part.value; });
+		var weekday = values.weekday;
+		var minutes = Number(values.hour) * 60 + Number(values.minute);
+		return weekday !== "Sat" && weekday !== "Sun" && minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+	}
+
+	function localSessionStart(timestamp) {
+		var parts = regularHoursFormatter.formatToParts(new Date(timestamp));
+		var values = {};
+		parts.forEach(function (part) { values[part.type] = part.value; });
+		var localMidnight = Date.UTC(
+			Number(values.year),
+			Number(values.month) - 1,
+			Number(values.day),
+			9,
+			30,
+		);
+		var localParts = sessionDateFormatter.formatToParts(new Date(localMidnight));
+		var localValues = {};
+		localParts.forEach(function (part) { localValues[part.type] = part.value; });
+		var representedAsUtc = Date.UTC(
+			Number(localValues.year),
+			Number(localValues.month) - 1,
+			Number(localValues.day),
+			Number(localValues.hour),
+			Number(localValues.minute),
+		);
+		return localMidnight - (representedAsUtc - localMidnight);
+	}
+
+	function regularHoursLookbackMs(timestamp) {
+		if (isRegularHours(timestamp)) { return 0; }
+		var day = timestamp;
+		for (var offset = 0; offset < 8; offset += 1) {
+			var close = localSessionStart(day) + (6 * 60 * 60 + 30 * 60) * 1000;
+			if (close <= timestamp && isRegularHours(close - 1000)) {
+				return timestamp - close;
+			}
+			day = localSessionStart(day) - 24 * 60 * 60 * 1000;
+		}
+		return 3 * 24 * 60 * 60 * 1000;
+	}
+
+	function regularSessionBarTime(timestamp, duration) {
+		var start = localSessionStart(timestamp);
+		return start + Math.floor((timestamp - start) / duration) * duration;
+	}
+
+	function isIntradayResolution(resolution) {
+		return /^(\d+)S$/.test(resolution) || /^\d+$/.test(resolution);
+	}
 
 	function resolutionDurationMs(resolution) {
 		var seconds = /^(\d+)S$/.exec(resolution);
@@ -60,13 +134,24 @@
 			.catch(function (error) { onError(error.message); });
 	};
 
-	LSELiveDatafeed.prototype.getBars = function (symbolInfo, resolution, period, onResult, onError) {
+	LSELiveDatafeed.prototype.getBars = function (symbolInfo, resolution, period, onResult, onError, sessionMode) {
+		var requestedCountBack = Math.max(1, Number(period.countBack) || 1000);
+		var queryCountBack = requestedCountBack;
+		var from = period.from;
+		if (sessionMode === "RTH" && isIntradayResolution(resolution)) {
+			var duration = resolutionDurationMs(resolution);
+			queryCountBack = Math.min(5000, Math.ceil(
+				requestedCountBack * 4 +
+				(regularHoursLookbackMs(period.to * 1000) + 24 * 60 * 60 * 1000) / duration,
+			));
+			from = Math.min(from, Math.floor((period.to * 1000 - queryCountBack * duration) / 1000));
+		}
 		var query = new URLSearchParams({
 			symbol: symbolInfo.ticker,
 			resolution: resolution,
-			from: String(period.from),
+			from: String(from),
 			to: String(period.to),
-			countback: String(period.countBack || 1000),
+			countback: String(queryCountBack),
 		});
 		fetch(this.baseUrl + "/history?" + query.toString())
 			.then(function (response) { return response.json(); })
@@ -86,10 +171,13 @@
 						volume: payload.v[index],
 					};
 				});
+				if (sessionMode === "RTH" && isIntradayResolution(resolution)) {
+					bars = bars.filter(function (bar) { return isRegularHours(bar.time); });
+				}
 				if (bars.length) {
 					var latestBar = bars[bars.length - 1];
 					this.setLatestPrice(symbolInfo.ticker, latestBar.close, latestBar.time);
-					var key = this.barKey(symbolInfo.ticker, resolution);
+					var key = this.barKey(symbolInfo.ticker, resolution, sessionMode);
 					var lastBar = latestBar;
 					this.lastBars.set(key, lastBar);
 					var state = this.barStates.get(key);
@@ -101,6 +189,8 @@
 							symbol: symbolInfo.ticker,
 							key: key,
 							duration: resolutionDurationMs(resolution),
+							intraday: isIntradayResolution(resolution),
+							sessionMode: sessionMode,
 							pendingBars: [],
 						};
 						this.barStates.set(key, state);
@@ -120,9 +210,9 @@
 			.catch(function (error) { onError(error.message); });
 	};
 
-	LSELiveDatafeed.prototype.subscribeBars = function (symbolInfo, resolution, onTick, listenerGuid) {
+	LSELiveDatafeed.prototype.subscribeBars = function (symbolInfo, resolution, onTick, listenerGuid, sessionMode) {
 		this.unsubscribeBars(listenerGuid);
-		var key = this.barKey(symbolInfo.ticker, resolution);
+		var key = this.barKey(symbolInfo.ticker, resolution, sessionMode);
 		var state = this.barStates.get(key);
 		if (!state) {
 			state = {
@@ -132,6 +222,8 @@
 				symbol: symbolInfo.ticker,
 				key: key,
 				duration: resolutionDurationMs(resolution),
+				intraday: isIntradayResolution(resolution),
+				sessionMode: sessionMode,
 			};
 			this.barStates.set(key, state);
 			this.replayCachedTicks(state);
@@ -154,24 +246,67 @@
 	LSELiveDatafeed.prototype.createClient = function (clientId) {
 		var datafeed = this;
 		var listenerIds = new Map();
+		var activeSubscriptions = new Map();
 		var prefix = "chart-" + String(clientId) + ":";
+		var sessionMode = "ETH";
 		return {
 			onReady: datafeed.onReady.bind(datafeed),
 			searchSymbols: datafeed.searchSymbols.bind(datafeed),
-			resolveSymbol: datafeed.resolveSymbol.bind(datafeed),
-			getBars: datafeed.getBars.bind(datafeed),
-			subscribeBars: function (symbolInfo, resolution, onTick, listenerGuid) {
+			resolveSymbol: function (symbolName, onResolve, onError) {
+				datafeed.resolveSymbol(symbolName, function (symbolInfo) {
+					if (sessionMode === "RTH") {
+						symbolInfo.session = "0930-1600:23456";
+						symbolInfo.timezone = "America/New_York";
+					}
+					onResolve(symbolInfo);
+				}, onError);
+			},
+			getBars: function (symbolInfo, resolution, period, onResult, onError) {
+				datafeed.getBars(symbolInfo, resolution, period, onResult, onError, sessionMode);
+			},
+			subscribeBars: function (symbolInfo, resolution, onTick, listenerGuid, onResetCacheNeeded) {
 				var previousId = listenerIds.get(listenerGuid);
 				if (previousId) { datafeed.unsubscribeBars(previousId); }
 				var namespacedId = prefix + listenerGuid;
 				listenerIds.set(listenerGuid, namespacedId);
-				datafeed.subscribeBars(symbolInfo, resolution, onTick, namespacedId);
+				activeSubscriptions.set(listenerGuid, {
+					symbolInfo: symbolInfo,
+					resolution: resolution,
+					onTick: onTick,
+					onResetCacheNeeded: onResetCacheNeeded,
+				});
+				datafeed.subscribeBars(symbolInfo, resolution, onTick, namespacedId, sessionMode);
 			},
 			unsubscribeBars: function (listenerGuid) {
 				var namespacedId = listenerIds.get(listenerGuid);
 				if (!namespacedId) { return; }
 				listenerIds.delete(listenerGuid);
+				activeSubscriptions.delete(listenerGuid);
 				datafeed.unsubscribeBars(namespacedId);
+			},
+			setRegularHoursEnabled: function (enabled) {
+				var nextMode = enabled ? "RTH" : "ETH";
+				if (sessionMode === nextMode) { return; }
+				sessionMode = nextMode;
+				var resetCallbacks = new Set();
+				activeSubscriptions.forEach(function (subscription, listenerGuid) {
+					if (typeof subscription.onResetCacheNeeded === "function") {
+						resetCallbacks.add(subscription.onResetCacheNeeded);
+					}
+					var namespacedId = listenerIds.get(listenerGuid);
+					if (namespacedId) { datafeed.unsubscribeBars(namespacedId); }
+					datafeed.subscribeBars(
+						subscription.symbolInfo,
+						subscription.resolution,
+						subscription.onTick,
+						namespacedId,
+						sessionMode,
+					);
+				});
+				resetCallbacks.forEach(function (resetCache) { resetCache(); });
+			},
+			isRegularHoursEnabled: function () {
+				return sessionMode === "RTH";
 			},
 		};
 	};
@@ -259,13 +394,18 @@
 		if (!Number.isFinite(tickTime) || !Number.isFinite(price) || !Number.isFinite(duration) || duration <= 0) {
 			return null;
 		}
+		if (state.sessionMode === "RTH" && state.intraday && !isRegularHours(tickTime)) {
+			return null;
+		}
 		if (tickTime < state.lastTickTime ||
 			(tickTime === state.lastTickTime && tickSequence <= state.lastTickSequence)) {
 			return null;
 		}
 		var currentBar = state.currentBar;
 		if (currentBar && tickTime < currentBar.time) { return null; }
-		var barTime = currentBar
+		var barTime = state.sessionMode === "RTH" && state.intraday
+			? regularSessionBarTime(tickTime, duration)
+			: currentBar
 			? currentBar.time + Math.floor((tickTime - currentBar.time) / duration) * duration
 			: Math.floor(tickTime / duration) * duration;
 		if (currentBar && barTime < currentBar.time) { return null; }
@@ -368,8 +508,8 @@
 		};
 	}
 
-	LSELiveDatafeed.prototype.barKey = function (symbol, resolution) {
-		return symbol + ":" + resolution;
+	LSELiveDatafeed.prototype.barKey = function (symbol, resolution, sessionMode) {
+		return symbol + ":" + resolution + ":" + (sessionMode || "ETH");
 	};
 
 	LSELiveDatafeed.prototype.getLastPrice = function (symbol) {
