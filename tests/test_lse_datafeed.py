@@ -6,6 +6,35 @@ import lse_datafeed
 
 
 class LiveTickBrokerTests(unittest.TestCase):
+    def test_merging_live_ticks_preserves_historical_open_and_candle_extremes(self):
+        historical = [{
+            "time": 1_798_000_000,
+            "open": 100,
+            "high": 110,
+            "low": 90,
+            "close": 105,
+            "volume": 50,
+        }]
+        live = [{
+            "time": historical[0]["time"],
+            "open": 107,
+            "high": 112,
+            "low": 95,
+            "close": 111,
+            "volume": 8,
+        }]
+
+        merged = lse_datafeed.LSERequestHandler.merge_bars(historical, live)
+
+        self.assertEqual(merged, [{
+            "time": historical[0]["time"],
+            "open": 100,
+            "high": 112,
+            "low": 90,
+            "close": 111,
+            "volume": 50,
+        }])
+
     def test_connects_to_chicago_live_feed(self):
         broker = lse_datafeed.LiveTickBroker("test-key")
         requested_start = "2026-10-26T02:00:00+00:00"

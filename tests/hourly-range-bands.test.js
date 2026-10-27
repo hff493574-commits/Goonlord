@@ -26,6 +26,13 @@ const indicator = browser.AverageHourlyRangeBands({
 	},
 });
 
+test("chart toolbar opens a default chart without passing its click event as a symbol", () => {
+	assert.match(
+		chartPage,
+		/addChartButton\.addEventListener\('click', function \(\) \{ addChartWindow\(\); \}\)/,
+	);
+});
+
 function createStudy(length2 = 20, scale = 1, resolution = "1") {
 	const context = {
 		new_sym() { throw new Error("Must not request other symbols"); },

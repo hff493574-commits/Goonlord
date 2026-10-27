@@ -287,7 +287,14 @@
 				}
 
 				function selectSymbol(symbol) {
-					if (activeWidgetIndex < 0) { return; }
+					if (activeWidgetIndex < 0 || !visibleChartIndexes.includes(activeWidgetIndex)) {
+						if (visibleChartIndexes.length) {
+							setChartWindowActive(visibleChartIndexes[0]);
+						} else {
+							addChartWindow(symbol);
+							return;
+						}
+					}
 					if (readyChartIndexes.has(activeWidgetIndex)) {
 						widget.activeChart().setSymbol(symbol);
 					} else {
@@ -1019,7 +1026,7 @@
 					saveChartDesktop();
 				}
 
-				function addChartWindow() {
+				function addChartWindow(symbol) {
 					if (visibleChartIndexes.length >= maxChartWindows) {
 						document.getElementById('chart-layout-status').textContent = 'MAXIMUM ' + maxChartWindows + ' CHARTS';
 						return;
@@ -1035,6 +1042,7 @@
 						}
 					}
 					if (toolbarChartIndex === -1) { toolbarChartIndex = index; }
+					if (symbol) { pendingSymbols.set(index, symbol); }
 					visibleChartIndexes.push(index);
 					ensureChartWidget(index);
 					setChartWindowActive(index);
@@ -1652,7 +1660,7 @@
 				chartGrid = canvasGrid(initialCanvas);
 				chartGrid.hidden = false;
 				restoreWatchlistCanvasState(initialCanvas);
-				addChartButton.addEventListener('click', addChartWindow);
+				addChartButton.addEventListener('click', function () { addChartWindow(); });
 				watchlistToggle.addEventListener('click', function () {
 					setWatchlistOpen(watchlistPanel.hidden || watchlistPanel.classList.contains('is-minimized'));
 				});

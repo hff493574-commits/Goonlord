@@ -8,6 +8,7 @@ const vm = require("node:vm");
 
 const fixedNow = Date.parse("2026-10-25T13:00:00Z");
 const eventSources = [];
+let historyPayload;
 class FixedDate extends Date {
 	constructor(...args) {
 		super(...(args.length ? args : [fixedNow]));
@@ -33,11 +34,61 @@ vm.runInNewContext(
 		Date: FixedDate,
 		EventSource: MockEventSource,
 		URL,
+		URLSearchParams,
 		setTimeout,
 		clearTimeout,
+		fetch: () => Promise.resolve({ json: () => Promise.resolve(historyPayload) }),
 		console,
 	},
 );
+
+test("history reconciliation keeps the historical open when live ticks arrived first", async () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const symbol = { ticker: "NQ.F" };
+	const key = datafeed.barKey(symbol.ticker, "60");
+	const barTime = Math.floor(fixedNow / 3_600_000) * 3_600_000;
+	datafeed.barStates.set(key, {
+		currentBar: {
+			time: barTime,
+			open: 20005,
+			high: 20025,
+			low: 19995,
+			close: 20020,
+			volume: 5,
+		},
+		lastTickTime: fixedNow,
+		lastTickSequence: 1,
+		symbol: symbol.ticker,
+		key,
+		duration: 3_600_000,
+		pendingBars: [],
+	});
+	historyPayload = {
+		s: "ok",
+		t: [barTime / 1000],
+		o: [20000],
+		h: [20010],
+		l: [19990],
+		c: [20005],
+		v: [100],
+	};
+
+	const result = await new Promise((resolve, reject) => {
+		datafeed.getBars(
+			symbol,
+			"60",
+			{ from: barTime / 1000 - 7200, to: fixedNow / 1000, countBack: 10 },
+			(bars) => resolve(bars),
+			reject,
+		);
+	});
+
+	assert.equal(result.length, 1);
+	assert.deepEqual(
+		{ open: result[0].open, high: result[0].high, low: result[0].low, close: result[0].close },
+		{ open: 20000, high: 20025, low: 19990, close: 20020 },
+	);
+});
 
 test("starts a fresh seconds subscription at the beginning of the server replay window", () => {
 	const datafeed = new browser.LSELiveDatafeed("https://example.test");

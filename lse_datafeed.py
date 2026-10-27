@@ -345,7 +345,19 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
     @staticmethod
     def merge_bars(historical_bars, live_bars):
         bars_by_time = {bar["time"]: bar for bar in historical_bars}
-        bars_by_time.update({bar["time"]: bar for bar in live_bars})
+        for live_bar in live_bars:
+            historical_bar = bars_by_time.get(live_bar["time"])
+            if historical_bar is None:
+                bars_by_time[live_bar["time"]] = live_bar
+                continue
+            bars_by_time[live_bar["time"]] = {
+                "time": historical_bar["time"],
+                "open": historical_bar["open"],
+                "high": max(historical_bar["high"], live_bar["high"]),
+                "low": min(historical_bar["low"], live_bar["low"]),
+                "close": live_bar["close"],
+                "volume": max(historical_bar["volume"], live_bar["volume"]),
+            }
         return [bars_by_time[bar_time] for bar_time in sorted(bars_by_time)]
 
     def stream(self, params):

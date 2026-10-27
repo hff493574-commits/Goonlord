@@ -105,6 +105,9 @@
 						};
 						this.barStates.set(key, state);
 						this.replayCachedTicks(state);
+					} else if (lastBar.time === state.currentBar.time) {
+						state.currentBar = mergeHistoricalAndLiveBar(lastBar, state.currentBar);
+						this.lastBars.set(key, state.currentBar);
 					}
 					var currentState = this.barStates.get(key);
 					if (currentState) {
@@ -336,19 +339,34 @@
 		var remaining = [];
 		pendingBars.forEach(function (bar) {
 			if (!Number.isFinite(endTime) || bar.time <= endTime) {
-				merged.set(bar.time, bar);
+				merged.set(bar.time, merged.has(bar.time)
+					? mergeHistoricalAndLiveBar(merged.get(bar.time), bar)
+					: bar);
 			} else {
 				remaining.push(bar);
 			}
 		});
 		if (state.currentBar && (!Number.isFinite(endTime) || state.currentBar.time <= endTime)) {
-			merged.set(state.currentBar.time, state.currentBar);
+			merged.set(state.currentBar.time, merged.has(state.currentBar.time)
+				? mergeHistoricalAndLiveBar(merged.get(state.currentBar.time), state.currentBar)
+				: state.currentBar);
 		}
 		state.pendingBars = remaining;
 		return Array.from(merged.values()).sort(function (left, right) {
 			return left.time - right.time;
 		});
 	};
+
+	function mergeHistoricalAndLiveBar(historicalBar, liveBar) {
+		return {
+			time: historicalBar.time,
+			open: historicalBar.open,
+			high: Math.max(historicalBar.high, liveBar.high),
+			low: Math.min(historicalBar.low, liveBar.low),
+			close: liveBar.close,
+			volume: Math.max(historicalBar.volume, liveBar.volume),
+		};
+	}
 
 	LSELiveDatafeed.prototype.barKey = function (symbol, resolution) {
 		return symbol + ":" + resolution;
