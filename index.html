@@ -10,11 +10,10 @@
 		<link rel="preconnect" href="https://fonts.googleapis.com">
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-		<link rel="stylesheet" href="dashboard.css?v=20261027-9">
+		<link rel="stylesheet" href="dashboard.css?v=20261027-17">
 
 		<script type="text/javascript" src="charting_library/charting_library.standalone.js"></script>
 		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261027-3"></script>
-		<script type="text/javascript" src="datafeeds/paper-broker.js?v=20261026-1"></script>
 		<script type="text/javascript" src="datafeeds/hourly-range-bands.js?v=20261024-4"></script>
 
 		<script type="text/javascript">
@@ -40,13 +39,21 @@
 					savedTheme : 'obsidian';
 				var chartLayoutStorageKey = 'lse-chart-layout-v1';
 				var chartGridStorageKey = 'lse-chart-desktop-v1';
+				var canvasStorageKey = 'lse-canvas-workspaces-v1';
+				localStorage.removeItem('lse-paper-account-v1');
+				localStorage.removeItem('lse-paper-execution-marks');
+				localStorage.removeItem('mfp-selected-account');
 				var chartGrid = document.getElementById('chart-grid');
+				var chartFrame = document.querySelector('.chart-frame');
+				var canvasTabs = document.getElementById('canvas-tabs');
+				var addCanvasButton = document.getElementById('add-canvas');
 				var addChartButton = document.getElementById('add-chart-window');
 				var commandPalette = document.getElementById('command-palette');
 				var commandInput = document.getElementById('command-palette-input');
 				var commandResults = document.getElementById('command-palette-results');
 				var activeChartSelect = document.getElementById('active-chart-select');
 				var watchlistToggleStorageKey = 'lse-watchlist-hidden-v1';
+				var watchlistPositionStorageKey = 'lse-watchlist-window-position-v1';
 				var watchlistPanel = document.querySelector('.watchlist-panel');
 				var chartWidgets = [];
 				var calendarAppWindow = null;
@@ -59,13 +66,46 @@
 				var drawingSyncTimers = new Map();
 				var activeWidgetIndex = 0;
 				var maxChartWindows = 8;
+				var workspaceCanvases = [];
+				var activeCanvasId = 'canvas-1';
+				var nextCanvasId = 2;
 				var visibleChartIndexes = [0];
 				var chartWindowRects = {};
 				var minimizedChartIndexes = [];
 				var hasSavedDesktop = false;
 				try {
+					var savedCanvases = JSON.parse(localStorage.getItem(canvasStorageKey) || 'null');
 					var savedDesktop = JSON.parse(localStorage.getItem(chartGridStorageKey) || 'null');
-					if (savedDesktop && Array.isArray(savedDesktop.open)) {
+					if (savedCanvases && Array.isArray(savedCanvases.canvases) &&
+						savedCanvases.canvases.some(function (canvas) {
+							return canvas && typeof canvas.id === 'string' && !canvas.mfpTerminal;
+						})) {
+						workspaceCanvases = savedCanvases.canvases.filter(function (canvas) {
+							return canvas && typeof canvas.id === 'string';
+						}).filter(function (canvas) {
+							return !canvas.mfpTerminal;
+						}).map(function (canvas, index) {
+							return {
+								id: canvas.id,
+								name: typeof canvas.name === 'string' ? canvas.name : 'Canvas ' + (index + 1),
+								open: Array.isArray(canvas.open) ? canvas.open.filter(function (chartIndex) {
+									return Number.isInteger(chartIndex) && chartIndex >= 0;
+								}) : [],
+								rects: canvas.rects && typeof canvas.rects === 'object' ? canvas.rects : {},
+								minimized: Array.isArray(canvas.minimized) ? canvas.minimized : [],
+								toolbar: Number.isInteger(canvas.toolbar) ? canvas.toolbar : -1,
+								calendarOpen: Boolean(canvas.calendarOpen),
+							};
+						});
+						activeCanvasId = workspaceCanvases.some(function (canvas) {
+							return canvas.id === savedCanvases.activeId;
+						}) ? savedCanvases.activeId : workspaceCanvases[0].id;
+						nextCanvasId = workspaceCanvases.reduce(function (nextId, canvas) {
+							var match = canvas.id.match(/^canvas-(\d+)$/);
+							return match ? Math.max(nextId, Number(match[1]) + 1) : nextId;
+						}, 1);
+						hasSavedDesktop = true;
+					} else if (savedDesktop && Array.isArray(savedDesktop.open)) {
 						hasSavedDesktop = true;
 						visibleChartIndexes = Array.from(new Set(savedDesktop.open.filter(function (index) {
 							return Number.isInteger(index) && index >= 0 && index < maxChartWindows;
@@ -76,17 +116,38 @@
 							savedDesktop.minimized.filter(function (index) {
 								return Number.isInteger(index) && index >= 0 && index < maxChartWindows;
 							}) : [];
+						workspaceCanvases = [{
+							id: activeCanvasId,
+							name: 'Canvas 1',
+							open: visibleChartIndexes,
+							rects: chartWindowRects,
+							minimized: minimizedChartIndexes,
+							toolbar: visibleChartIndexes.length ? visibleChartIndexes[0] : -1,
+							calendarOpen: false,
+						}];
 					}
 				} catch (error) {
 					console.error('Unable to restore chart workspace:', error);
 				}
+				if (!workspaceCanvases.length) {
+					workspaceCanvases = [{
+						id: activeCanvasId, name: 'Canvas 1', open: visibleChartIndexes,
+						rects: chartWindowRects, minimized: minimizedChartIndexes,
+						toolbar: visibleChartIndexes.length ? visibleChartIndexes[0] : -1, calendarOpen: false,
+					}];
+				}
+				var initialCanvas = workspaceCanvases.find(function (canvas) { return canvas.id === activeCanvasId; });
+				visibleChartIndexes = initialCanvas.open;
+				chartWindowRects = initialCanvas.rects;
+				minimizedChartIndexes = initialCanvas.minimized;
 				if (!hasSavedDesktop && !visibleChartIndexes.includes(0)) { visibleChartIndexes.unshift(0); }
-				var toolbarChartIndex = visibleChartIndexes.length ? visibleChartIndexes[0] : -1;
+				var toolbarChartIndex = initialCanvas.toolbar >= 0 ? initialCanvas.toolbar :
+					(visibleChartIndexes.length ? visibleChartIndexes[0] : -1);
+				chartGrid.dataset.canvasId = activeCanvasId;
 				var defaultChartSymbols = ['NQ.F', 'ES.F', 'GC.F', 'FDAX.F'];
 				document.documentElement.dataset.theme = initialTheme;
 
 				var chartDatafeed = new LSELiveDatafeed(datafeedUrl);
-				var paperBroker = new LSEPaperBroker(null, chartDatafeed);
 				var widgetOptions = {
 					fullscreen: false,
 					autosize: true,
@@ -157,22 +218,6 @@
 				});
 
 				var activeSymbol = 'NQ.F';
-				var executionMarkers = new Map();
-				var executionMarksStorageKey = 'lse-paper-execution-marks';
-				var executionMarksVisible = localStorage.getItem(executionMarksStorageKey) !== 'false';
-				var paperPositions = document.getElementById('paper-positions');
-				var paperExecutions = document.getElementById('paper-executions');
-				var paperStatus = document.getElementById('paper-status');
-				var paperBalance = document.getElementById('paper-balance');
-				var paperEquity = document.getElementById('paper-equity');
-				var paperUnrealized = document.getElementById('paper-unrealized');
-				var paperQuantity = document.getElementById('paper-quantity');
-				var paperTradingPanel = document.getElementById('paper-trading-panel');
-				var paperTradingToggle = document.getElementById('paper-trading-toggle');
-				var executionMarksToggle = document.getElementById('paper-execution-marks');
-				executionMarksToggle.checked = executionMarksVisible;
-				var unsubscribePaperAccount;
-				var paperSnapshot;
 				var watchItems = document.getElementById('watch-items');
 				var searchInput = document.getElementById('watch-search');
 				var searchResults = document.getElementById('search-results');
@@ -225,195 +270,8 @@
 					return symbol.replace(/\.F$/i, '');
 				}
 
-				function formatPaperNumber(value, digits) {
-					return Number(value).toLocaleString('en-US', {
-						minimumFractionDigits: 0,
-						maximumFractionDigits: digits === undefined ? 2 : digits,
-					});
-				}
-
-				function renderPaperAccount(snapshot) {
-					paperBalance.textContent = '$' + formatPaperNumber(snapshot.balance);
-					paperEquity.textContent = '$' + formatPaperNumber(snapshot.equity);
-					paperUnrealized.textContent = (snapshot.unrealized >= 0 ? '+' : '−') +
-						'$' + formatPaperNumber(Math.abs(snapshot.unrealized));
-					paperUnrealized.classList.toggle('is-negative', snapshot.unrealized < 0);
-					paperUnrealized.classList.toggle('is-positive', snapshot.unrealized >= 0);
-
-					paperPositions.replaceChildren();
-					var visiblePositions = snapshot.positions;
-					if (!visiblePositions.length) {
-						var empty = document.createElement('p');
-						empty.className = 'paper-empty';
-						empty.textContent = 'No open paper positions';
-						paperPositions.append(empty);
-					}
-					visiblePositions.forEach(function (position) {
-						var row = document.createElement('div');
-						row.className = 'paper-position-row';
-						var details = document.createElement('div');
-						details.className = 'paper-position-details';
-						var heading = document.createElement('strong');
-						heading.textContent = (position.qty > 0 ? 'LONG ' : 'SHORT ') +
-							formatPaperNumber(Math.abs(position.qty), 0) + ' ' + displaySymbol(position.symbol);
-						var prices = document.createElement('span');
-						prices.textContent = 'AVG ' + formatPaperNumber(position.avgPrice) +
-							(position.markPrice === null ? ' · WAITING FOR PRICE' :
-								' · LAST ' + formatPaperNumber(position.markPrice));
-						var pnl = document.createElement('b');
-						pnl.className = position.unrealized < 0 ? 'is-negative' : 'is-positive';
-						pnl.textContent = (position.unrealized >= 0 ? '+' : '−') +
-							'$' + formatPaperNumber(Math.abs(position.unrealized));
-						var close = document.createElement('button');
-						close.type = 'button';
-						close.className = 'paper-close-position';
-						close.textContent = 'CLOSE';
-						close.addEventListener('click', function () {
-							close.disabled = true;
-							paperBroker.closePosition(position.symbol)
-								.then(function () { paperStatus.textContent = 'Position closed at market'; })
-								.catch(showPaperError)
-								.finally(function () { close.disabled = false; });
-						});
-						details.append(heading, prices);
-						row.append(details, pnl, close);
-						paperPositions.append(row);
-					});
-
-					paperExecutions.replaceChildren();
-					var executions = snapshot.history.slice(0, 8);
-					if (!executions.length) {
-						var noExecutions = document.createElement('p');
-						noExecutions.className = 'paper-empty';
-						noExecutions.textContent = 'No fills for this symbol yet';
-						paperExecutions.append(noExecutions);
-					}
-					executions.forEach(function (execution) {
-						var item = document.createElement('div');
-						item.className = 'paper-execution-row';
-						var time = document.createElement('time');
-						time.textContent = new Date(execution.updateTime).toLocaleTimeString([], {
-							hour: '2-digit', minute: '2-digit', second: '2-digit',
-						});
-						var sideLabel = document.createElement('strong');
-						sideLabel.className = execution.side === 1 ? 'is-positive' : 'is-negative';
-						sideLabel.textContent = execution.side === 1 ? 'BUY' : 'SELL';
-						var symbol = document.createElement('span');
-						symbol.className = 'paper-execution-symbol';
-						symbol.textContent = displaySymbol(execution.symbol);
-						var fill = document.createElement('span');
-						fill.textContent = formatPaperNumber(execution.qty, 0) + ' @ ' +
-							formatPaperNumber(execution.avgPrice);
-						item.append(time, symbol, sideLabel, fill);
-						paperExecutions.append(item);
-					});
-				}
-
-				function showPaperError(error) {
-					paperStatus.textContent = error && error.message ? error.message : 'Paper order failed';
-					console.error('Paper trading:', error);
-				}
-
-				function clearExecutionMarkers() {
-					executionMarkers.forEach(function (marker) {
-						if (marker.id !== null) { marker.chart.removeEntity(marker.id); }
-					});
-					executionMarkers.clear();
-				}
-
-				function executionMarkerPrice(execution) {
-					var ticks = {
-						'NQ.F': 0.25, 'NASDAQ100.F': 0.25,
-						'ES.F': 0.25, 'SP500.F': 0.25,
-						'GC.F': 0.1, 'GOLD.F': 0.1,
-					};
-					var tick = ticks[execution.symbol.toUpperCase()] || 0.01;
-					return execution.avgPrice + (execution.side === 1 ? -tick * 3 : tick * 3);
-				}
-
-				function drawExecutionMarkers(history, symbol) {
-					if (!executionMarksVisible || symbol !== activeSymbol) { return; }
-					if (!readyChartIndexes.has(activeWidgetIndex)) { return; }
-					var chart = widget.activeChart();
-					history.filter(function (execution) {
-						return execution.symbol === symbol;
-					}).slice(0, 100).reverse().forEach(function (execution) {
-						var markerKey = activeWidgetIndex + ':' + execution.id + ':' + execution.symbol;
-						if (executionMarkers.has(markerKey)) { return; }
-						var marker = { id: null, chart: chart, chartIndex: activeWidgetIndex };
-						executionMarkers.set(markerKey, marker);
-						chart.createShape({
-							time: execution.updateTime / 1000,
-							price: executionMarkerPrice(execution),
-						}, {
-							shape: execution.side === 1 ? 'arrow_up' : 'arrow_down',
-							overrides: {
-								'linetoolarrow.linecolor': execution.side === 1 ? '#089981' : '#f23645',
-								'linetoolarrow.linewidth': 1,
-							},
-							lock: true,
-							disableSelection: true,
-							disableSave: true,
-							showInObjectsTree: false,
-						}).then(function (entityId) {
-							if (executionMarkers.get(markerKey) !== marker ||
-								!executionMarksVisible || activeSymbol !== symbol ||
-								activeWidgetIndex !== marker.chartIndex) {
-								chart.removeEntity(entityId);
-								return;
-							}
-							marker.id = entityId;
-						}).catch(function (error) {
-							executionMarkers.delete(markerKey);
-							console.warn('Unable to draw paper execution marker:', error);
-						});
-					});
-				}
-
-				function placePaperOrder(side) {
-					var quantity = Number(paperQuantity.value);
-					if (!Number.isInteger(quantity) || quantity < 1 || quantity > 1000) {
-						paperStatus.textContent = 'Quantity must be a whole number from 1 to 1,000';
-						return;
-					}
-					var buttons = paperTradingPanel.querySelectorAll('[data-order-side]');
-					buttons.forEach(function (button) { button.disabled = true; });
-					paperStatus.textContent = 'Filling simulated market order…';
-					paperBroker.placeOrder({
-						symbol: activeSymbol,
-						type: 2,
-						side: side,
-						qty: quantity,
-					}).then(function () {
-						paperStatus.textContent = 'Paper order filled · simulated only';
-					}).catch(showPaperError).finally(function () {
-						buttons.forEach(function (button) { button.disabled = false; });
-					});
-				}
-
-				paperTradingPanel.querySelectorAll('[data-order-side]').forEach(function (button) {
-					button.addEventListener('click', function () {
-						placePaperOrder(Number(button.dataset.orderSide));
-					});
-				});
-				paperTradingToggle.addEventListener('click', function () {
-					var collapsed = paperTradingPanel.classList.toggle('is-collapsed');
-					paperTradingToggle.setAttribute('aria-expanded', String(!collapsed));
-					paperTradingToggle.textContent = collapsed ? 'SHOW' : 'HIDE';
-				});
-				executionMarksToggle.addEventListener('change', function () {
-					executionMarksVisible = executionMarksToggle.checked;
-					localStorage.setItem(executionMarksStorageKey, String(executionMarksVisible));
-					if (executionMarksVisible && paperSnapshot) {
-						drawExecutionMarkers(paperSnapshot.history, activeSymbol);
-					} else {
-						clearExecutionMarkers();
-					}
-				});
-
 				function updateSymbol(symbol) {
 					activeSymbol = symbol;
-					document.getElementById('paper-active-symbol').textContent = 'ORDER ' + displaySymbol(symbol);
 					watchItems.querySelectorAll('[data-symbol]').forEach(function (button) {
 						var active = button.dataset.symbol === symbol;
 						button.classList.toggle('is-active', active);
@@ -445,12 +303,138 @@
 					activeChartSelect.value = String(activeWidgetIndex);
 					document.getElementById('chart-layout-status').textContent = visibleChartIndexes.length ?
 						visibleChartIndexes.length + ' CHART WINDOWS · ACTIVE ' + (activeWidgetIndex + 1) :
-						'EMPTY WORKSPACE';
+						'EMPTY CANVAS';
+				}
+
+				function activeCanvas() {
+					return workspaceCanvases.find(function (canvas) { return canvas.id === activeCanvasId; });
+				}
+
+				function canvasGrid(canvas) {
+					var existingGrid = chartFrame.querySelector('[data-canvas-id="' + canvas.id + '"]');
+					if (existingGrid) { return existingGrid; }
+					var grid = document.createElement('div');
+					grid.className = 'canvas-grid';
+					grid.id = 'chart-grid-' + canvas.id;
+					grid.dataset.canvasId = canvas.id;
+					grid.hidden = true;
+					chartFrame.append(grid);
+					return grid;
+				}
+
+				function renderCanvasTabs() {
+					canvasTabs.replaceChildren();
+					workspaceCanvases.forEach(function (canvas, index) {
+						canvas.name = 'Canvas ' + (index + 1);
+						var tabGroup = document.createElement('div');
+						tabGroup.className = 'canvas-tab-group' + (canvas.id === activeCanvasId ? ' is-active' : '');
+						var tab = document.createElement('button');
+						tab.type = 'button';
+						tab.className = 'canvas-tab';
+						tab.setAttribute('aria-pressed', String(canvas.id === activeCanvasId));
+						tab.title = 'Switch to ' + canvas.name;
+						tab.textContent = canvas.name;
+						tab.addEventListener('click', function () { switchCanvas(canvas.id); });
+						tabGroup.append(tab);
+						if (workspaceCanvases.length > 1) {
+							var closeButton = document.createElement('button');
+							closeButton.type = 'button';
+							closeButton.className = 'canvas-tab-close';
+							closeButton.setAttribute('aria-label', 'Close ' + canvas.name);
+							closeButton.title = 'Close ' + canvas.name;
+							closeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg>';
+							closeButton.addEventListener('click', function (event) {
+								event.stopPropagation();
+								removeCanvas(canvas.id);
+							});
+							tabGroup.append(closeButton);
+						}
+						canvasTabs.append(tabGroup);
+					});
+					canvasTabs.append(addCanvasButton);
+				}
+
+				function saveCurrentCanvasState() {
+					var canvas = activeCanvas();
+					if (!canvas) { return; }
+					canvas.open = visibleChartIndexes.slice();
+					canvas.rects = chartWindowRects;
+					canvas.minimized = visibleChartIndexes.filter(function (index) {
+						var cell = document.getElementById('chart-cell-' + index);
+						return cell && cell.classList.contains('is-minimized');
+					});
+					canvas.toolbar = toolbarChartIndex;
+					canvas.calendarOpen = Boolean(chartGrid.querySelector('.calendar-app-window'));
+				}
+
+				function switchCanvas(canvasId) {
+					if (canvasId === activeCanvasId) { return; }
+					saveCurrentCanvasState();
+					chartGrid.hidden = true;
+					var canvas = workspaceCanvases.find(function (item) { return item.id === canvasId; });
+					if (!canvas) { return; }
+					activeCanvasId = canvas.id;
+					visibleChartIndexes = canvas.open;
+					chartWindowRects = canvas.rects;
+					minimizedChartIndexes = canvas.minimized;
+					toolbarChartIndex = canvas.toolbar >= 0 ? canvas.toolbar :
+						(visibleChartIndexes.length ? visibleChartIndexes[0] : -1);
+					chartGrid = canvasGrid(canvas);
+					chartGrid.hidden = false;
+					calendarAppWindow = chartGrid.querySelector('.calendar-app-window');
+					visibleChartIndexes.forEach(function (index) { ensureChartWidget(index); });
+					activeWidgetIndex = -1;
+					if (visibleChartIndexes.length) { setChartWindowActive(visibleChartIndexes[0]); }
+					else { setActiveChartWidget(-1); }
+					renderCanvasTabs();
+					updateChartSelectors();
+					saveChartDesktop();
+				}
+
+				function addCanvas() {
+					saveCurrentCanvasState();
+					var canvas = {
+						id: 'canvas-' + nextCanvasId,
+						name: 'Canvas ' + (workspaceCanvases.length + 1),
+						open: [], rects: {}, minimized: [], toolbar: -1, calendarOpen: false,
+					};
+					nextCanvasId += 1;
+					workspaceCanvases.push(canvas);
+					canvasGrid(canvas);
+					switchCanvas(canvas.id);
+				}
+
+				function removeCanvas(canvasId) {
+					if (workspaceCanvases.length <= 1) { return; }
+					var canvas = workspaceCanvases.find(function (item) { return item.id === canvasId; });
+					if (!canvas) { return; }
+					if (canvas.id === activeCanvasId) {
+						var replacement = workspaceCanvases.find(function (item) { return item.id !== canvasId; });
+						switchCanvas(replacement.id);
+					}
+					clearDrawingMirrors();
+					canvas.open.forEach(function (index) {
+						var chartWidget = chartWidgets[index];
+						if (chartWidget) {
+							saveChartLayout(chartWidget, index);
+							chartWidget.remove();
+						}
+						var cell = document.getElementById('chart-cell-' + index);
+						if (cell) { cell.remove(); }
+						chartWidgets[index] = null;
+						readyChartIndexes.delete(index);
+						pendingSymbols.delete(index);
+						localStorage.removeItem(chartStateStorageKey(index));
+					});
+					var grid = chartFrame.querySelector('[data-canvas-id="' + canvas.id + '"]');
+					if (grid) { grid.remove(); }
+					workspaceCanvases = workspaceCanvases.filter(function (item) { return item.id !== canvasId; });
+					renderCanvasTabs();
+					saveChartDesktop();
 				}
 
 				function setActiveChartWidget(index) {
 					if (index === -1 && visibleChartIndexes.length === 0) {
-						clearExecutionMarkers();
 						activeWidgetIndex = -1;
 						widget = null;
 						window.tvWidget = null;
@@ -458,7 +442,6 @@
 						return;
 					}
 					if (!visibleChartIndexes.includes(index)) { return; }
-					if (activeWidgetIndex !== index) { clearExecutionMarkers(); }
 					activeWidgetIndex = index;
 					widget = chartWidgets[index];
 					window.tvWidget = widget;
@@ -466,10 +449,6 @@
 						activeSymbol = widget.activeChart().symbol();
 						updateSymbol(activeSymbol);
 						if (!tickTape.hidden) { startTickTape(activeSymbol); }
-						if (paperSnapshot) {
-							renderPaperAccount(paperSnapshot);
-							drawExecutionMarkers(paperSnapshot.history, activeSymbol);
-						}
 					} else {
 						activeSymbol = defaultChartSymbols[index];
 						updateSymbol(activeSymbol);
@@ -920,7 +899,12 @@
 				}
 
 				function saveChartDesktop() {
+					saveCurrentCanvasState();
 					try {
+						localStorage.setItem(canvasStorageKey, JSON.stringify({
+							activeId: activeCanvasId,
+							canvases: workspaceCanvases,
+						}));
 						localStorage.setItem(chartGridStorageKey, JSON.stringify({
 							open: visibleChartIndexes,
 							rects: chartWindowRects,
@@ -936,11 +920,6 @@
 
 				function closeChartWindow(index) {
 					if (!visibleChartIndexes.includes(index)) { return; }
-					var nextToolbarIndex = toolbarChartIndex === index ?
-						visibleChartIndexes.find(function (visibleIndex) { return visibleIndex !== index; }) : null;
-					if (activeWidgetIndex === index || activeWidgetIndex === nextToolbarIndex) {
-						clearExecutionMarkers();
-					}
 					clearDrawingMirrors();
 					var chartWidget = chartWidgets[index];
 					if (chartWidget) {
@@ -983,16 +962,19 @@
 				}
 
 				function addChartWindow() {
+					if (visibleChartIndexes.length >= maxChartWindows) {
+						document.getElementById('chart-layout-status').textContent = 'MAXIMUM ' + maxChartWindows + ' CHARTS';
+						return;
+					}
 					var index = -1;
-					for (var candidate = 0; candidate < maxChartWindows; candidate += 1) {
-						if (!visibleChartIndexes.includes(candidate)) {
+					var usedIndexes = new Set(workspaceCanvases.reduce(function (indexes, canvas) {
+						return indexes.concat(canvas.open);
+					}, []));
+					for (var candidate = 0; index === -1; candidate += 1) {
+						if (!usedIndexes.has(candidate)) {
 							index = candidate;
 							break;
 						}
-					}
-					if (index === -1) {
-						document.getElementById('chart-layout-status').textContent = 'MAXIMUM ' + maxChartWindows + ' CHARTS';
-						return;
 					}
 					if (toolbarChartIndex === -1) { toolbarChartIndex = index; }
 					visibleChartIndexes.push(index);
@@ -1007,7 +989,7 @@
 					var containerId = createChartCell(index);
 					var options = Object.assign({}, widgetOptions, {
 						container: containerId,
-						symbol: defaultChartSymbols[index] || defaultChartSymbols[0],
+						symbol: defaultChartSymbols[index % defaultChartSymbols.length],
 						datafeed: chartDatafeed.createClient(index),
 					});
 					if (index !== toolbarChartIndex) {
@@ -1052,13 +1034,8 @@
 							synchronizeAllDrawings();
 							if (index !== activeWidgetIndex) { return; }
 							var symbol = info.ticker || info.name;
-							clearExecutionMarkers();
 							updateSymbol(symbol);
 							if (!tickTape.hidden) { startTickTape(symbol); }
-							if (paperSnapshot) {
-								renderPaperAccount(paperSnapshot);
-								drawExecutionMarkers(paperSnapshot.history, symbol);
-							}
 						});
 						chart.onDataLoaded().subscribe(null, function () {
 							var previousNames = [
@@ -1098,13 +1075,6 @@
 							window.tvWidget = chartWidget;
 							activeSymbol = chart.symbol();
 							updateSymbol(activeSymbol);
-						}
-						if (!unsubscribePaperAccount) {
-							unsubscribePaperAccount = paperBroker.subscribeAccount(function (snapshot) {
-								paperSnapshot = snapshot;
-								renderPaperAccount(snapshot);
-								drawExecutionMarkers(snapshot.history, activeSymbol);
-							});
 						}
 					});
 				}
@@ -1394,17 +1364,19 @@
 					} catch (error) {
 						console.error('Unable to save theme preference:', error);
 					}
-					if (calendarAppWindow) {
-						var calendarWidget = calendarAppWindow.querySelector('.tradingview-widget-container');
+					workspaceCanvases.forEach(function (canvas) {
+						var grid = canvasGrid(canvas);
+						var calendarWidget = grid.querySelector('.calendar-app-window .tradingview-widget-container');
 						if (calendarWidget) { renderEconomicCalendar('dark', calendarWidget); }
-					}
+					});
 				}
 
 				var workspaceCommands = [
+					{ command: '/canvas', title: 'New canvas', detail: 'Create and switch to a new workspace canvas', run: addCanvas },
 					{ command: '/chart', title: 'New chart', detail: 'Open a chart window', run: addChartWindow },
 					{ command: '/charts', title: 'Restore minimized charts', detail: 'Bring minimized charts back to the canvas', run: restoreMinimizedCharts },
-					{ command: '/watchlist', title: 'Show watchlist', detail: 'Open the watchlist panel', run: function () { setWatchlistHidden(false, true); } },
-					{ command: '/watchlist hide', title: 'Hide watchlist', detail: 'Close the watchlist panel', run: function () { setWatchlistHidden(true, true); } },
+					{ command: '/watchlist', title: 'Open watchlist', detail: 'Show the watchlist as a floating window', run: function () { setWatchlistHidden(false, true); } },
+					{ command: '/watchlist hide', title: 'Hide watchlist', detail: 'Close the floating watchlist', run: function () { setWatchlistHidden(true, true); } },
 					{ command: '/news', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
 					{ command: '/calendar', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
 				];
@@ -1452,7 +1424,6 @@
 					closeCommandPalette();
 					command.run();
 				}
-
 				commandInput.addEventListener('input', renderCommandResults);
 				commandInput.addEventListener('keydown', function (event) {
 					if (event.key === 'Escape') {
@@ -1543,6 +1514,7 @@
 						calendarAppWindow.classList.remove('is-minimized');
 						calendarAppWindow.hidden = false;
 						calendarAppWindow.style.zIndex = String(nextCanvasZIndex());
+						saveChartDesktop();
 						return;
 					}
 					var bounds = chartGrid.getBoundingClientRect();
@@ -1565,6 +1537,7 @@
 					closeButton.addEventListener('click', function () {
 						appWindow.remove();
 						calendarAppWindow = null;
+						saveChartDesktop();
 					});
 					titlebar.querySelector('.chart-window-actions').append(closeButton);
 					var content = document.createElement('div');
@@ -1612,8 +1585,13 @@
 					chartGrid.append(appWindow);
 					calendarAppWindow = appWindow;
 					renderEconomicCalendar(initialTheme, widget);
+					saveChartDesktop();
 				}
 
+				addCanvasButton.addEventListener('click', addCanvas);
+				renderCanvasTabs();
+				workspaceCanvases.forEach(function (canvas) { canvasGrid(canvas); });
+				chartGrid.hidden = false;
 				addChartButton.addEventListener('click', addChartWindow);
 				activeChartSelect.addEventListener('change', function () {
 					setActiveChartWidget(Number(activeChartSelect.value));
@@ -1634,7 +1612,26 @@
 					}
 				});
 				function setWatchlistHidden(hidden, persist) {
-					document.querySelector('.terminal-grid').classList.toggle('is-watchlist-hidden', hidden);
+					var terminalGrid = document.querySelector('.terminal-grid');
+					terminalGrid.classList.add('is-watchlist-hidden');
+					watchlistPanel.classList.toggle('is-floating', !hidden);
+					watchlistPanel.hidden = hidden;
+					if (!hidden) {
+						try {
+							var savedPosition = JSON.parse(localStorage.getItem(watchlistPositionStorageKey) || 'null');
+							if (savedPosition && Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
+								watchlistPanel.style.left = Math.max(0, Math.min(
+									window.innerWidth - watchlistPanel.offsetWidth, savedPosition.left
+								)) + 'px';
+								watchlistPanel.style.top = Math.max(0, Math.min(
+									window.innerHeight - 48, savedPosition.top
+								)) + 'px';
+								watchlistPanel.style.right = 'auto';
+							}
+						} catch (error) {
+							console.error('Unable to restore watchlist position:', error);
+						}
+					}
 					watchlistPanel.setAttribute('aria-hidden', String(hidden));
 					watchlistPanel.inert = hidden;
 					if (persist) {
@@ -1645,20 +1642,57 @@
 						}
 					}
 				}
+				var watchlistTitlebar = watchlistPanel.querySelector('.watchlist-tools');
+				watchlistTitlebar.addEventListener('pointerdown', function (event) {
+					if (!watchlistPanel.classList.contains('is-floating') || event.button !== 0 ||
+						event.target.closest('button')) { return; }
+					event.preventDefault();
+					watchlistTitlebar.setPointerCapture(event.pointerId);
+					var startX = event.clientX;
+					var startY = event.clientY;
+					var startLeft = watchlistPanel.getBoundingClientRect().left;
+					var startTop = watchlistPanel.getBoundingClientRect().top;
+					function moveWatchlist(moveEvent) {
+						if (moveEvent.pointerId !== event.pointerId) { return; }
+						watchlistPanel.style.left = Math.max(0, Math.min(
+							window.innerWidth - watchlistPanel.offsetWidth,
+							startLeft + moveEvent.clientX - startX
+						)) + 'px';
+						watchlistPanel.style.top = Math.max(0, Math.min(
+							window.innerHeight - 48,
+							startTop + moveEvent.clientY - startY
+						)) + 'px';
+					}
+					function finishWatchlistMove() {
+						window.removeEventListener('pointermove', moveWatchlist);
+						window.removeEventListener('pointerup', finishWatchlistMove);
+						window.removeEventListener('pointercancel', finishWatchlistMove);
+						if (watchlistTitlebar.hasPointerCapture(event.pointerId)) {
+							watchlistTitlebar.releasePointerCapture(event.pointerId);
+						}
+						try {
+							localStorage.setItem(watchlistPositionStorageKey, JSON.stringify({
+								left: watchlistPanel.offsetLeft,
+								top: watchlistPanel.offsetTop,
+							}));
+						} catch (error) {
+							console.error('Unable to save watchlist position:', error);
+						}
+					}
+					window.addEventListener('pointermove', moveWatchlist);
+					window.addEventListener('pointerup', finishWatchlistMove);
+					window.addEventListener('pointercancel', finishWatchlistMove);
+				});
 				setWatchlistHidden(true, false);
 
 				renderWatchlist();
 				visibleChartIndexes.forEach(function (index) {
 					ensureChartWidget(index);
 				});
+				if (initialCanvas.calendarOpen) { openEconomicCalendarWindow(); }
 				if (visibleChartIndexes.length) { setChartWindowActive(visibleChartIndexes[0]); }
 				updateChartSelectors();
 				saveChartDesktop();
-				window.addEventListener('pagehide', function () {
-					clearExecutionMarkers();
-					if (unsubscribePaperAccount) { unsubscribePaperAccount(); }
-				});
-
 			};
 
 			window.addEventListener('DOMContentLoaded', initOnReady, false);
@@ -1673,6 +1707,9 @@
 					<div class="chart-layout-bar" aria-label="Chart layout controls">
 						<button id="add-chart-window" class="workspace-action-button" type="button" aria-label="Add chart" title="Add chart"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span>CHART</span></button>
 						<button id="command-palette-toggle" class="workspace-action-button command-open-button" type="button" aria-label="Open command palette" title="Command palette (/)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4-3 4 3 4m4-8 3 4-3 4"/></svg><span>COMMAND</span><kbd>/</kbd></button>
+						<div id="canvas-tabs" class="canvas-tabs" aria-label="Workspace canvases">
+							<button id="add-canvas" class="workspace-action-button add-canvas-button" type="button" title="Add canvas" aria-label="Add canvas"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
+						</div>
 						<label for="active-chart-select">ACTIVE CHART
 							<select id="active-chart-select" aria-label="Active chart"></select>
 						</label>
@@ -1683,49 +1720,10 @@
 						<span id="chart-layout-status" role="status" aria-live="polite"></span>
 					</div>
 					<div class="chart-frame"><div id="chart-grid"></div></div>
-					<section id="paper-trading-panel" class="paper-trading-panel" aria-label="Paper trading">
-						<div class="paper-panel-heading">
-							<div class="paper-panel-title">
-								<span class="feed-mark"></span>
-								<h2>Paper Trading</h2>
-								<span class="paper-simulated-label">SIMULATED</span>
-							</div>
-							<div class="paper-panel-actions">
-								<label class="paper-mark-toggle" for="paper-execution-marks">
-									<input id="paper-execution-marks" type="checkbox">
-									<span>FILL MARKS</span>
-								</label>
-								<button id="paper-trading-toggle" class="paper-collapse-button" type="button" aria-expanded="true" aria-controls="paper-trading-content">HIDE</button>
-							</div>
-						</div>
-						<div id="paper-trading-content" class="paper-trading-content">
-							<div class="paper-account-summary" aria-label="Paper account summary">
-								<div><span>Balance</span><strong id="paper-balance">$100,000.00</strong></div>
-								<div><span>Equity</span><strong id="paper-equity">$100,000.00</strong></div>
-								<div><span>Unrealized P&amp;L</span><strong id="paper-unrealized" class="is-positive">$0.00</strong></div>
-							</div>
-							<div class="paper-trade-controls">
-								<label for="paper-quantity">QTY</label>
-								<input id="paper-quantity" type="number" min="1" max="1000" step="1" value="1" inputmode="numeric">
-								<button type="button" class="paper-order-button paper-buy-button" data-order-side="1">BUY MARKET</button>
-								<button type="button" class="paper-order-button paper-sell-button" data-order-side="-1">SELL MARKET</button>
-								<span id="paper-status" role="status" aria-live="polite">Paper account ready · orders are simulated</span>
-							</div>
-							<div class="paper-data-columns">
-								<section class="paper-data-section" aria-label="Open paper positions">
-									<h3>OPEN POSITIONS <span id="paper-active-symbol"></span></h3>
-									<div id="paper-positions" class="paper-positions"><p class="paper-empty">Loading paper account…</p></div>
-								</section>
-								<section class="paper-data-section paper-execution-section" aria-label="Recent paper executions">
-									<h3>RECENT FILLS</h3>
-									<div id="paper-executions" class="paper-executions"><p class="paper-empty">Loading paper account…</p></div>
-								</section>
-							</div>
-						</div>
-					</section>
 				</main>
 				<aside id="watchlist-panel" class="watchlist-panel" aria-label="Watchlist">
 					<div class="watchlist-tools">
+						<strong class="watchlist-window-label">WATCHLIST</strong>
 						<span class="watchlist-live-label"><i></i> LIVE</span>
 					</div>
 					<div class="panel-heading">
