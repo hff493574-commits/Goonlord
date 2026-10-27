@@ -111,3 +111,41 @@ test("keeps the latest market price from regressing on older replay ticks", () =
 	assert.equal(datafeed.getLastPrice("NQ.F"), 20005);
 	assert.deepEqual(prices, [20005]);
 });
+
+test("keeps chart subscriptions independent when widgets reuse a listener GUID", () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const firstChart = datafeed.createClient(0);
+	const secondChart = datafeed.createClient(1);
+	const firstBars = [];
+	const secondBars = [];
+	const symbol = { ticker: "NQ.F" };
+	const streamsBefore = eventSources.length;
+
+	firstChart.subscribeBars(symbol, "1", (bar) => firstBars.push(bar), "shared-guid");
+	secondChart.subscribeBars(symbol, "1", (bar) => secondBars.push(bar), "shared-guid");
+	assert.equal(eventSources.length, streamsBefore + 1);
+
+	const stream = eventSources.at(-1);
+	stream.onmessage({ data: JSON.stringify({
+		time: fixedNow / 1000,
+		timestamp_ms: fixedNow,
+		sequence: 1,
+		price: 20000,
+		volume: 1,
+	}) });
+
+	assert.equal(firstBars.length, 1);
+	assert.equal(secondBars.length, 1);
+
+	firstChart.unsubscribeBars("shared-guid");
+	stream.onmessage({ data: JSON.stringify({
+		time: fixedNow / 1000 + 1,
+		timestamp_ms: fixedNow + 1_000,
+		sequence: 2,
+		price: 20001,
+		volume: 1,
+	}) });
+
+	assert.equal(firstBars.length, 1);
+	assert.equal(secondBars.length, 2);
+});

@@ -6,14 +6,14 @@
 
 		<!-- Fix for iOS Safari zooming bug -->
 		<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,minimum-scale=1.0">
-		<meta name="theme-color" content="#12191b">
+		<meta name="theme-color" content="#070809">
 		<link rel="preconnect" href="https://fonts.googleapis.com">
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-		<link rel="stylesheet" href="dashboard.css?v=20261026-1">
+		<link rel="stylesheet" href="dashboard.css?v=20261027-8">
 
 		<script type="text/javascript" src="charting_library/charting_library.standalone.js"></script>
-		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261025-5"></script>
+		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261027-3"></script>
 		<script type="text/javascript" src="datafeeds/paper-broker.js?v=20261026-1"></script>
 		<script type="text/javascript" src="datafeeds/hourly-range-bands.js?v=20261024-4"></script>
 
@@ -28,24 +28,65 @@
 
 			function initOnReady() {
 				var datafeedUrl = window.location.origin;
-				var themeSelect = document.getElementById('theme-select');
-				var initialTheme = localStorage.getItem('lse-theme') || getParameterByName('theme') || 'dark';
-				var widgetReady = false;
-				var chartLayoutReady = false;
+				var initialTheme = 'dark';
 				var chartLayoutStorageKey = 'lse-chart-layout-v1';
+				var chartGridStorageKey = 'lse-chart-desktop-v1';
+				var chartGrid = document.getElementById('chart-grid');
+				var addChartButton = document.getElementById('add-chart-window');
+				var commandPalette = document.getElementById('command-palette');
+				var commandInput = document.getElementById('command-palette-input');
+				var commandResults = document.getElementById('command-palette-results');
+				var activeChartSelect = document.getElementById('active-chart-select');
+				var watchlistToggle = document.getElementById('watchlist-toggle');
+				var watchlistToggleStorageKey = 'lse-watchlist-hidden-v1';
+				var watchlistPanel = document.querySelector('.watchlist-panel');
+				var chartWidgets = [];
+				var calendarAppWindow = null;
+				var readyChartIndexes = new Set();
+				var pendingSymbols = new Map();
+				var drawingSyncStorageKey = 'lse-chart-drawing-sync-v1';
+				var drawingSyncEnabled = localStorage.getItem(drawingSyncStorageKey) !== 'false';
+				var drawingMirrorRegistry = new Map();
+				var mirroredDrawingIds = new Set();
+				var drawingSyncTimers = new Map();
+				var activeWidgetIndex = 0;
+				var maxChartWindows = 8;
+				var visibleChartIndexes = [0];
+				var chartWindowRects = {};
+				var minimizedChartIndexes = [];
+				var hasSavedDesktop = false;
+				try {
+					var savedDesktop = JSON.parse(localStorage.getItem(chartGridStorageKey) || 'null');
+					if (savedDesktop && Array.isArray(savedDesktop.open)) {
+						hasSavedDesktop = true;
+						visibleChartIndexes = Array.from(new Set(savedDesktop.open.filter(function (index) {
+							return Number.isInteger(index) && index >= 0 && index < maxChartWindows;
+						})));
+						chartWindowRects = savedDesktop.rects && typeof savedDesktop.rects === 'object' ?
+							savedDesktop.rects : {};
+						minimizedChartIndexes = Array.isArray(savedDesktop.minimized) ?
+							savedDesktop.minimized.filter(function (index) {
+								return Number.isInteger(index) && index >= 0 && index < maxChartWindows;
+							}) : [];
+					}
+				} catch (error) {
+					console.error('Unable to restore chart workspace:', error);
+				}
+				if (!hasSavedDesktop && !visibleChartIndexes.includes(0)) { visibleChartIndexes.unshift(0); }
+				var toolbarChartIndex = visibleChartIndexes.length ? visibleChartIndexes[0] : -1;
+				var defaultChartSymbols = ['NQ.F', 'ES.F', 'GC.F', 'FDAX.F'];
 				document.documentElement.dataset.theme = initialTheme;
-				themeSelect.value = initialTheme;
 
 				var chartDatafeed = new LSELiveDatafeed(datafeedUrl);
 				var paperBroker = new LSEPaperBroker(null, chartDatafeed);
-				var widget = window.tvWidget = new TradingView.widget({
+				var widgetOptions = {
 					fullscreen: false,
 					autosize: true,
 					symbol: 'NQ.F',
 					interval: '1',
 					timezone: 'America/New_York',
 					container: "tv_chart_container",
-					datafeed: chartDatafeed,
+					datafeed: chartDatafeed.createClient(0),
 					library_path: "charting_library/",
 					locale: getParameterByName('lang') || "en",
 					disabled_features: ["use_localstorage_for_settings"],
@@ -79,14 +120,19 @@
 					charts_storage_api_version: "1.1",
 					client_id: 'tradingview.com',
 					user_id: 'public_user_id',
-				});
+				};
+				var widget;
 
-				function saveChartLayout() {
-					if (!chartLayoutReady) { return; }
+				function chartStateStorageKey(index) {
+					return index === 0 ? chartLayoutStorageKey : chartLayoutStorageKey + '-chart-' + index;
+				}
+
+				function saveChartLayout(chartWidget, index) {
+					if (!readyChartIndexes.has(index)) { return; }
 					try {
-						widget.save(function (state) {
+						chartWidget.save(function (state) {
 							try {
-								localStorage.setItem(chartLayoutStorageKey, JSON.stringify(state));
+								localStorage.setItem(chartStateStorageKey(index), JSON.stringify(state));
 							} catch (error) {
 								console.error('Unable to save chart layout:', error);
 							}
@@ -96,7 +142,11 @@
 					}
 				}
 
-				window.addEventListener('pagehide', saveChartLayout);
+				window.addEventListener('pagehide', function () {
+					chartWidgets.forEach(function (chartWidget, index) {
+						if (chartWidget) { saveChartLayout(chartWidget, index); }
+					});
+				});
 
 				var activeSymbol = 'NQ.F';
 				var executionMarkers = new Map();
@@ -257,9 +307,8 @@
 				}
 
 				function clearExecutionMarkers() {
-					var chart = widget.activeChart();
 					executionMarkers.forEach(function (marker) {
-						if (marker.id !== null) { chart.removeEntity(marker.id); }
+						if (marker.id !== null) { marker.chart.removeEntity(marker.id); }
 					});
 					executionMarkers.clear();
 				}
@@ -276,13 +325,14 @@
 
 				function drawExecutionMarkers(history, symbol) {
 					if (!executionMarksVisible || symbol !== activeSymbol) { return; }
+					if (!readyChartIndexes.has(activeWidgetIndex)) { return; }
 					var chart = widget.activeChart();
 					history.filter(function (execution) {
 						return execution.symbol === symbol;
 					}).slice(0, 100).reverse().forEach(function (execution) {
-						var markerKey = execution.id + ':' + execution.symbol;
+						var markerKey = activeWidgetIndex + ':' + execution.id + ':' + execution.symbol;
 						if (executionMarkers.has(markerKey)) { return; }
-						var marker = { id: null };
+						var marker = { id: null, chart: chart, chartIndex: activeWidgetIndex };
 						executionMarkers.set(markerKey, marker);
 						chart.createShape({
 							time: execution.updateTime / 1000,
@@ -299,7 +349,8 @@
 							showInObjectsTree: false,
 						}).then(function (entityId) {
 							if (executionMarkers.get(markerKey) !== marker ||
-								!executionMarksVisible || activeSymbol !== symbol) {
+								!executionMarksVisible || activeSymbol !== symbol ||
+								activeWidgetIndex !== marker.chartIndex) {
 								chart.removeEntity(entityId);
 								return;
 							}
@@ -360,10 +411,673 @@
 						button.classList.toggle('is-active', active);
 						button.setAttribute('aria-pressed', String(active));
 					});
+					updateChartSelectors();
 				}
 
 				function selectSymbol(symbol) {
-					widget.activeChart().setSymbol(symbol);
+					if (activeWidgetIndex < 0) { return; }
+					if (readyChartIndexes.has(activeWidgetIndex)) {
+						widget.activeChart().setSymbol(symbol);
+					} else {
+						pendingSymbols.set(activeWidgetIndex, symbol);
+					}
+				}
+
+				function updateChartSelectors() {
+					activeChartSelect.replaceChildren();
+					visibleChartIndexes.forEach(function (index) {
+						var chartWidget = chartWidgets[index];
+						var chartSymbol = readyChartIndexes.has(index) ?
+							chartWidget.activeChart().symbol() : defaultChartSymbols[index];
+						var option = document.createElement('option');
+						option.value = String(index);
+						option.textContent = 'Chart ' + (index + 1) + ' · ' + displaySymbol(chartSymbol);
+						activeChartSelect.append(option);
+					});
+					activeChartSelect.value = String(activeWidgetIndex);
+					document.getElementById('chart-layout-status').textContent = visibleChartIndexes.length ?
+						visibleChartIndexes.length + ' CHART WINDOWS · ACTIVE ' + (activeWidgetIndex + 1) :
+						'EMPTY WORKSPACE';
+				}
+
+				function setActiveChartWidget(index) {
+					if (index === -1 && visibleChartIndexes.length === 0) {
+						clearExecutionMarkers();
+						activeWidgetIndex = -1;
+						widget = null;
+						window.tvWidget = null;
+						updateChartSelectors();
+						return;
+					}
+					if (!visibleChartIndexes.includes(index)) { return; }
+					if (activeWidgetIndex !== index) { clearExecutionMarkers(); }
+					activeWidgetIndex = index;
+					widget = chartWidgets[index];
+					window.tvWidget = widget;
+					if (readyChartIndexes.has(index)) {
+						activeSymbol = widget.activeChart().symbol();
+						updateSymbol(activeSymbol);
+						if (!tickTape.hidden) { startTickTape(activeSymbol); }
+						if (paperSnapshot) {
+							renderPaperAccount(paperSnapshot);
+							drawExecutionMarkers(paperSnapshot.history, activeSymbol);
+						}
+					} else {
+						activeSymbol = defaultChartSymbols[index];
+						updateSymbol(activeSymbol);
+					}
+				}
+
+				var drawingSyncInProgress = 0;
+
+				function drawingRecordKey(index, entityId) {
+					return index + ':' + entityId;
+				}
+
+				function removeDrawingMirror(record, chartIndex) {
+					var entityId = record.mirrors.get(chartIndex);
+					if (entityId === undefined) { return; }
+					record.mirrors.delete(chartIndex);
+					mirroredDrawingIds.delete(chartIndex + ':' + entityId);
+					if (readyChartIndexes.has(chartIndex)) {
+						drawingSyncInProgress += 1;
+						try { chartWidgets[chartIndex].activeChart().removeEntity(entityId); }
+						finally { drawingSyncInProgress -= 1; }
+					}
+				}
+
+				function clearDrawingMirrors() {
+					drawingMirrorRegistry.forEach(function (record) {
+						Array.from(record.mirrors.keys()).forEach(function (chartIndex) {
+							removeDrawingMirror(record, chartIndex);
+						});
+					});
+					drawingMirrorRegistry.clear();
+				}
+
+				function drawingShapeName(name) {
+					return String(name)
+						.replace(/^LineTool/, '')
+						.replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+						.replace(/[^a-zA-Z0-9]+/g, '_')
+						.replace(/^_+|_+$/g, '')
+						.toLowerCase();
+				}
+
+				function drawingSnapshot(chart, info) {
+					var shape = chart.getShapeById(info.id);
+					var anchoredPosition = shape.getAnchoredPosition();
+					return {
+						name: info.name,
+						shape: drawingShapeName(info.name),
+						points: anchoredPosition ? null : shape.getPoints(),
+						anchoredPosition: anchoredPosition || null,
+						properties: shape.getProperties(),
+						selectionEnabled: shape.isSelectionEnabled(),
+					};
+				}
+
+				async function createDrawingMirror(chart, snapshot) {
+					var options = {
+						shape: snapshot.shape,
+						overrides: snapshot.properties,
+						disableUndo: true,
+						disableSave: true,
+					};
+					var entityId;
+					if (snapshot.anchoredPosition) {
+						entityId = await chart.createAnchoredShape(snapshot.anchoredPosition, options);
+					} else if (snapshot.points.length === 1) {
+						entityId = await chart.createShape(snapshot.points[0], options);
+					} else {
+						entityId = await chart.createMultipointShape(snapshot.points, options);
+					}
+					var mirror = chart.getShapeById(entityId);
+					mirror.setSelectionEnabled(snapshot.selectionEnabled);
+					return entityId;
+				}
+
+				async function synchronizeDrawing(sourceIndex, entityId, eventType) {
+					if (!drawingSyncEnabled || drawingSyncInProgress ||
+						!readyChartIndexes.has(sourceIndex)) { return; }
+					var sourceChart = chartWidgets[sourceIndex].activeChart();
+					var key = drawingRecordKey(sourceIndex, entityId);
+					var record = drawingMirrorRegistry.get(key);
+					var info = sourceChart.getAllShapes().find(function (shapeInfo) {
+						return shapeInfo.id === entityId;
+					});
+					if (eventType === 'remove' || !info) {
+						if (record) {
+							Array.from(record.mirrors.keys()).forEach(function (chartIndex) {
+								removeDrawingMirror(record, chartIndex);
+							});
+							drawingMirrorRegistry.delete(key);
+						}
+						return;
+					}
+					var shape = sourceChart.getShapeById(entityId);
+					if (!shape.isSavingEnabled()) { return; }
+					var snapshot;
+					try {
+						snapshot = drawingSnapshot(sourceChart, info);
+					} catch (error) {
+						console.warn('Unable to synchronize drawing:', error);
+						return;
+					}
+					if (record) {
+						Array.from(record.mirrors.keys()).forEach(function (chartIndex) {
+							removeDrawingMirror(record, chartIndex);
+						});
+					} else {
+						record = { sourceIndex: sourceIndex, sourceId: entityId, mirrors: new Map() };
+						drawingMirrorRegistry.set(key, record);
+					}
+					record.sourceSymbol = sourceChart.symbol();
+					for (var visibleIndex = 0; visibleIndex < visibleChartIndexes.length; visibleIndex += 1) {
+						var chartIndex = visibleChartIndexes[visibleIndex];
+						if (chartIndex === sourceIndex || !readyChartIndexes.has(chartIndex) ||
+							chartWidgets[chartIndex].activeChart().symbol() !== record.sourceSymbol) { continue; }
+						try {
+							drawingSyncInProgress += 1;
+							var mirrorId = await createDrawingMirror(
+								chartWidgets[chartIndex].activeChart(),
+								snapshot,
+							);
+							record.mirrors.set(chartIndex, mirrorId);
+							mirroredDrawingIds.add(chartIndex + ':' + mirrorId);
+						} catch (error) {
+							console.warn('Unable to mirror drawing to chart ' + (chartIndex + 1) + ':', error);
+						} finally {
+							drawingSyncInProgress -= 1;
+						}
+					}
+				}
+
+				function scheduleDrawingSync(chartIndex, entityId, eventType) {
+					var key = chartIndex + ':' + entityId;
+					window.clearTimeout(drawingSyncTimers.get(key));
+					drawingSyncTimers.set(key, window.setTimeout(function () {
+						drawingSyncTimers.delete(key);
+						synchronizeDrawing(chartIndex, entityId, eventType);
+					}, 60));
+				}
+
+				function synchronizeAllDrawings() {
+					if (!drawingSyncEnabled) { return; }
+					clearDrawingMirrors();
+					chartWidgets.forEach(function (chartWidget, chartIndex) {
+						if (!chartWidget || !readyChartIndexes.has(chartIndex)) { return; }
+						chartWidget.activeChart().getAllShapes().forEach(function (shapeInfo) {
+							scheduleDrawingSync(chartIndex, shapeInfo.id, 'create');
+						});
+					});
+				}
+
+				function findDrawingMirror(chartIndex, entityId) {
+					var match = null;
+					drawingMirrorRegistry.forEach(function (record) {
+						if (record.mirrors.get(chartIndex) === entityId) { match = record; }
+					});
+					return match;
+				}
+
+				function propagateMirroredDrawingChange(chartIndex, entityId, eventType) {
+					var record = findDrawingMirror(chartIndex, entityId);
+					if (!record || !readyChartIndexes.has(record.sourceIndex)) { return; }
+					var sourceChart = chartWidgets[record.sourceIndex].activeChart();
+					if (eventType === 'remove') {
+						sourceChart.removeEntity(record.sourceId);
+						return;
+					}
+					try {
+						var sourceShape = sourceChart.getShapeById(record.sourceId);
+						var mirrorChart = chartWidgets[chartIndex].activeChart();
+						var mirrorInfo = mirrorChart.getAllShapes().find(function (shapeInfo) {
+							return shapeInfo.id === entityId;
+						});
+						if (!mirrorInfo) { return; }
+						var mirrorShape = mirrorChart.getShapeById(entityId);
+						var anchoredPosition = mirrorShape.getAnchoredPosition();
+						if (anchoredPosition) {
+							sourceShape.setAnchoredPosition(anchoredPosition);
+						} else {
+							sourceShape.setPoints(mirrorShape.getPoints());
+						}
+						sourceShape.setProperties(mirrorShape.getProperties());
+					} catch (error) {
+						console.warn('Unable to apply a synchronized drawing edit:', error);
+					}
+				}
+
+				function createChartCell(index) {
+					var cell = document.createElement('div');
+					cell.className = 'chart-grid-cell' + (index === toolbarChartIndex ? ' has-drawing-toolbar' : '');
+					cell.id = 'chart-cell-' + index;
+					cell.dataset.chartIndex = String(index);
+					cell.style.zIndex = String(index + 1);
+					var titlebar = document.createElement('div');
+					titlebar.className = 'chart-window-titlebar';
+					titlebar.title = 'Click and hold the title bar to move this chart';
+					titlebar.innerHTML = '<div class="chart-window-drag-handle" title="Hold and drag to move"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r=".7"/><circle cx="11" cy="4" r=".7"/><circle cx="5" cy="8" r=".7"/><circle cx="11" cy="8" r=".7"/><circle cx="5" cy="12" r=".7"/><circle cx="11" cy="12" r=".7"/></svg></div><strong></strong><div class="chart-window-actions"></div>';
+					titlebar.querySelector('strong').textContent = 'CHART ' + (index + 1);
+					var actions = titlebar.querySelector('.chart-window-actions');
+					var minimizeButton = document.createElement('button');
+					minimizeButton.type = 'button';
+					minimizeButton.className = 'chart-window-button';
+					minimizeButton.setAttribute('aria-label', 'Minimize chart ' + (index + 1));
+					minimizeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.5h10"/></svg>';
+					minimizeButton.addEventListener('click', function (event) {
+						event.stopPropagation();
+						if (cell.classList.contains('is-minimized')) {
+							cell.classList.remove('is-minimized');
+							applyChartWindowRect(cell, chartWindowRects[index] || defaultChartRect(index));
+						} else {
+							chartWindowRects[index] = readChartWindowRect(cell);
+							cell.classList.add('is-minimized');
+						}
+						minimizeButton.setAttribute('aria-label',
+							(cell.classList.contains('is-minimized') ? 'Restore chart ' : 'Minimize chart ') + (index + 1));
+						saveChartDesktop();
+					});
+					var maximizeButton = document.createElement('button');
+					maximizeButton.type = 'button';
+					maximizeButton.className = 'chart-window-button';
+					maximizeButton.setAttribute('aria-label', 'Maximize chart ' + (index + 1));
+					maximizeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.25" y="3.25" width="9.5" height="9.5" rx="1"/></svg>';
+					maximizeButton.addEventListener('click', function (event) {
+						event.stopPropagation();
+						if (cell.classList.contains('is-maximized')) {
+							cell.classList.remove('is-maximized');
+							applyChartWindowRect(cell, chartWindowRects[index] || defaultChartRect(index));
+						} else {
+							chartWindowRects[index] = readChartWindowRect(cell);
+							cell.classList.add('is-maximized');
+						}
+						saveChartDesktop();
+					});
+					var closeButton = document.createElement('button');
+					closeButton.type = 'button';
+					closeButton.className = 'chart-window-button chart-window-close';
+					closeButton.setAttribute('aria-label', 'Close chart ' + (index + 1));
+					closeButton.title = 'Close chart';
+					closeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg>';
+					closeButton.addEventListener('click', function (event) {
+						event.stopPropagation();
+						closeChartWindow(index);
+					});
+					if (minimizedChartIndexes.includes(index)) {
+						cell.classList.add('is-minimized');
+						minimizeButton.setAttribute('aria-label', 'Restore chart ' + (index + 1));
+					}
+					actions.append(minimizeButton, maximizeButton, closeButton);
+					cell.append(titlebar);
+					var container = document.createElement('div');
+					container.id = 'tv_chart_container_' + index;
+					container.className = 'chart-window-content';
+					cell.append(container);
+					['n', 'e', 's', 'w', 'ne', 'se', 'sw', 'nw'].forEach(function (direction) {
+						var resizeHandle = document.createElement('div');
+						resizeHandle.className = 'chart-window-resize resize-' + direction;
+						resizeHandle.dataset.direction = direction;
+						resizeHandle.title = 'Drag to resize chart';
+						resizeHandle.setAttribute('aria-hidden', 'true');
+						resizeHandle.addEventListener('pointerdown', function (event) {
+							beginChartWindowResize(index, cell, direction, event);
+						});
+						cell.append(resizeHandle);
+					});
+					cell.addEventListener('pointerdown', function () {
+						setChartWindowActive(index);
+					});
+					titlebar.addEventListener('pointerdown', function (event) {
+						if (event.button !== 0 || event.target.closest('button') ||
+							cell.classList.contains('is-maximized')) { return; }
+						event.preventDefault();
+						titlebar.setPointerCapture(event.pointerId);
+						setChartWindowActive(index);
+						cell.classList.add('is-moving');
+						var startX = event.clientX;
+						var startY = event.clientY;
+						var startRect = readChartWindowRect(cell);
+						var moveFinished = false;
+						function moveWindow(moveEvent) {
+							if (moveEvent.pointerId !== event.pointerId) { return; }
+							if ((moveEvent.buttons & 1) === 0) {
+								finishMove();
+								return;
+							}
+							var next = Object.assign({}, startRect, {
+								x: startRect.x + moveEvent.clientX - startX,
+								y: startRect.y + moveEvent.clientY - startY,
+							});
+							applyChartWindowRect(cell, next);
+						}
+						function finishMove() {
+							if (moveFinished) { return; }
+							moveFinished = true;
+							window.removeEventListener('pointermove', moveWindow);
+							window.removeEventListener('pointerup', finishMove);
+							window.removeEventListener('pointercancel', finishMove);
+							if (titlebar.hasPointerCapture(event.pointerId)) {
+								titlebar.releasePointerCapture(event.pointerId);
+							}
+							cell.classList.remove('is-moving');
+							var movedRect = readChartWindowRect(cell);
+							if (cell.classList.contains('is-minimized')) {
+								movedRect.height = (chartWindowRects[index] || startRect).height;
+							}
+							chartWindowRects[index] = movedRect;
+							saveChartDesktop();
+						}
+						window.addEventListener('pointermove', moveWindow);
+						window.addEventListener('pointerup', finishMove);
+						window.addEventListener('pointercancel', finishMove);
+					});
+					titlebar.addEventListener('contextmenu', function (event) {
+						event.preventDefault();
+					});
+					chartGrid.append(cell);
+					return container.id;
+				}
+
+				function defaultChartRect(index) {
+					var bounds = chartGrid.getBoundingClientRect();
+					return {
+						x: Math.min(bounds.width * (0.04 + index * 0.035), Math.max(0, bounds.width - 320)),
+						y: Math.min(bounds.height * (0.04 + index * 0.035), Math.max(0, bounds.height - 240)),
+						width: Math.min(bounds.width * 0.72, bounds.width),
+						height: Math.min(bounds.height * 0.82, bounds.height),
+					};
+				}
+
+				function readChartWindowRect(cell) {
+					var gridBounds = chartGrid.getBoundingClientRect();
+					var bounds = cell.getBoundingClientRect();
+					return {
+						x: bounds.left - gridBounds.left,
+						y: bounds.top - gridBounds.top,
+						width: bounds.width,
+						height: bounds.height,
+					};
+				}
+
+				function applyChartWindowRect(cell, rect) {
+					var gridBounds = chartGrid.getBoundingClientRect();
+					var width = Math.max(220, Number(rect.width) || gridBounds.width * 0.7);
+					var height = Math.max(160, Number(rect.height) || gridBounds.height * 0.8);
+					var x = Math.max(0, Math.min(Number(rect.x) || 0, Math.max(0, gridBounds.width - 96)));
+					var y = Math.max(0, Math.min(Number(rect.y) || 0, Math.max(0, gridBounds.height - 31)));
+					cell.style.left = x + 'px';
+					cell.style.top = y + 'px';
+					cell.style.width = width + 'px';
+					cell.style.height = height + 'px';
+				}
+
+				function beginChartWindowResize(index, cell, direction, event) {
+					if (event.button !== 0 || cell.classList.contains('is-maximized') ||
+						cell.classList.contains('is-minimized')) { return; }
+					event.preventDefault();
+					event.stopPropagation();
+					var resizeHandle = event.currentTarget;
+					resizeHandle.setPointerCapture(event.pointerId);
+					setChartWindowActive(index);
+					var startX = event.clientX;
+					var startY = event.clientY;
+					var startRect = readChartWindowRect(cell);
+					var resizeFinished = false;
+					function resizeWindow(moveEvent) {
+						if (moveEvent.pointerId !== event.pointerId) { return; }
+						if ((moveEvent.buttons & 1) === 0) {
+							finishResize();
+							return;
+						}
+						var dx = moveEvent.clientX - startX;
+						var dy = moveEvent.clientY - startY;
+						var bounds = chartGrid.getBoundingClientRect();
+						var minWidth = Math.min(220, bounds.width);
+						var minHeight = Math.min(160, bounds.height);
+						var next = Object.assign({}, startRect);
+						if (direction.includes('e')) {
+							next.width = Math.max(minWidth, Math.min(startRect.width + dx, bounds.width - startRect.x));
+						}
+						if (direction.includes('s')) {
+							next.height = Math.max(minHeight, Math.min(startRect.height + dy, bounds.height - startRect.y));
+						}
+						if (direction.includes('w')) {
+							next.x = Math.max(0, Math.min(startRect.x + dx, startRect.x + startRect.width - minWidth));
+							next.width = startRect.width + startRect.x - next.x;
+						}
+						if (direction.includes('n')) {
+							next.y = Math.max(0, Math.min(startRect.y + dy, startRect.y + startRect.height - minHeight));
+							next.height = startRect.height + startRect.y - next.y;
+						}
+						applyChartWindowRect(cell, next);
+					}
+					function finishResize() {
+						if (resizeFinished) { return; }
+						resizeFinished = true;
+						window.removeEventListener('pointermove', resizeWindow);
+						window.removeEventListener('pointerup', finishResize);
+						window.removeEventListener('pointercancel', finishResize);
+						if (resizeHandle.hasPointerCapture(event.pointerId)) {
+							resizeHandle.releasePointerCapture(event.pointerId);
+						}
+						chartWindowRects[index] = readChartWindowRect(cell);
+						saveChartDesktop();
+					}
+					window.addEventListener('pointermove', resizeWindow);
+					window.addEventListener('pointerup', finishResize);
+					window.addEventListener('pointercancel', finishResize);
+				}
+
+				function setChartWindowActive(index) {
+					Array.from(chartGrid.children).forEach(function (item) {
+						item.classList.toggle('is-active', Number(item.dataset.chartIndex) === index);
+					});
+					var cell = document.getElementById('chart-cell-' + index);
+					if (cell) {
+						cell.style.zIndex = String(nextCanvasZIndex());
+					}
+					setActiveChartWidget(index);
+				}
+
+				function nextCanvasZIndex() {
+					return Math.max.apply(null, [10].concat(Array.from(chartGrid.children).map(function (item) {
+						return Number(item.style.zIndex) || 1;
+					}))) + 1;
+				}
+
+				function saveChartDesktop() {
+					try {
+						localStorage.setItem(chartGridStorageKey, JSON.stringify({
+							open: visibleChartIndexes,
+							rects: chartWindowRects,
+							minimized: visibleChartIndexes.filter(function (index) {
+								var cell = document.getElementById('chart-cell-' + index);
+								return cell && cell.classList.contains('is-minimized');
+							}),
+						}));
+					} catch (error) {
+						console.error('Unable to save chart workspace:', error);
+					}
+				}
+
+				function closeChartWindow(index) {
+					if (!visibleChartIndexes.includes(index)) { return; }
+					var nextToolbarIndex = toolbarChartIndex === index ?
+						visibleChartIndexes.find(function (visibleIndex) { return visibleIndex !== index; }) : null;
+					if (activeWidgetIndex === index || activeWidgetIndex === nextToolbarIndex) {
+						clearExecutionMarkers();
+					}
+					clearDrawingMirrors();
+					var chartWidget = chartWidgets[index];
+					if (chartWidget) {
+						saveChartLayout(chartWidget, index);
+						chartWidget.remove();
+					}
+					var cell = document.getElementById('chart-cell-' + index);
+					if (cell) { cell.remove(); }
+					chartWidgets[index] = null;
+					readyChartIndexes.delete(index);
+					pendingSymbols.delete(index);
+					visibleChartIndexes = visibleChartIndexes.filter(function (visibleIndex) {
+						return visibleIndex !== index;
+					});
+					if (toolbarChartIndex === index) {
+						toolbarChartIndex = visibleChartIndexes.length ? visibleChartIndexes[0] : -1;
+						if (toolbarChartIndex !== -1) {
+							var promotedIndex = toolbarChartIndex;
+							var promotedWidget = chartWidgets[promotedIndex];
+							if (promotedWidget) {
+								saveChartLayout(promotedWidget, promotedIndex);
+								promotedWidget.remove();
+							}
+							var promotedCell = document.getElementById('chart-cell-' + promotedIndex);
+							if (promotedCell) { promotedCell.remove(); }
+							chartWidgets[promotedIndex] = null;
+							readyChartIndexes.delete(promotedIndex);
+							ensureChartWidget(promotedIndex);
+							if (activeWidgetIndex === promotedIndex) { setChartWindowActive(promotedIndex); }
+						}
+					}
+					if (activeWidgetIndex === index) {
+						if (visibleChartIndexes.length) { setChartWindowActive(visibleChartIndexes[0]); }
+						else { setActiveChartWidget(-1); }
+					}
+					if (!visibleChartIndexes.length) { toolbarChartIndex = -1; }
+					updateChartSelectors();
+					if (drawingSyncEnabled) { synchronizeAllDrawings(); }
+					saveChartDesktop();
+				}
+
+				function addChartWindow() {
+					var index = -1;
+					for (var candidate = 0; candidate < maxChartWindows; candidate += 1) {
+						if (!visibleChartIndexes.includes(candidate)) {
+							index = candidate;
+							break;
+						}
+					}
+					if (index === -1) {
+						document.getElementById('chart-layout-status').textContent = 'MAXIMUM ' + maxChartWindows + ' CHARTS';
+						return;
+					}
+					if (toolbarChartIndex === -1) { toolbarChartIndex = index; }
+					visibleChartIndexes.push(index);
+					ensureChartWidget(index);
+					setChartWindowActive(index);
+					updateChartSelectors();
+					saveChartDesktop();
+				}
+
+				function ensureChartWidget(index) {
+					if (chartWidgets[index]) { return; }
+					var containerId = createChartCell(index);
+					var options = Object.assign({}, widgetOptions, {
+						container: containerId,
+						symbol: defaultChartSymbols[index] || defaultChartSymbols[0],
+						datafeed: chartDatafeed.createClient(index),
+					});
+					if (index !== toolbarChartIndex) {
+						options.disabled_features = ["use_localstorage_for_settings", "header_widget", "left_toolbar"];
+					}
+					var chartWidget = new TradingView.widget(options);
+					chartWidgets[index] = chartWidget;
+					var savedRect = chartWindowRects[index] || defaultChartRect(index);
+					applyChartWindowRect(document.getElementById('chart-cell-' + index), savedRect);
+					registerChartWidget(chartWidget, index);
+				}
+
+				function registerChartWidget(chartWidget, index) {
+					chartWidget.onChartReady(async function () {
+						var chart = chartWidget.activeChart();
+						var windowTitle = document.querySelector('#chart-cell-' + index + ' .chart-window-titlebar strong');
+						if (windowTitle) {
+							windowTitle.textContent = 'CHART ' + (index + 1) + ' · ' + displaySymbol(chart.symbol());
+						}
+						if (document.documentElement.dataset.theme !== initialTheme) {
+							chartWidget.changeTheme(document.documentElement.dataset.theme);
+						}
+						chartWidget.subscribe('onAutoSaveNeeded', function () {
+							saveChartLayout(chartWidget, index);
+						});
+						chartWidget.subscribe('drawing_event', function (entityId, eventType) {
+							if (!drawingSyncEnabled || drawingSyncInProgress) { return; }
+							var mirroredKey = index + ':' + entityId;
+							if (mirroredDrawingIds.has(mirroredKey)) {
+								propagateMirroredDrawingChange(index, entityId, eventType);
+								if (eventType === 'remove') {
+									var mirrorRecord = findDrawingMirror(index, entityId);
+									if (mirrorRecord) { mirrorRecord.mirrors.delete(index); }
+									mirroredDrawingIds.delete(mirroredKey);
+								}
+								return;
+							}
+							scheduleDrawingSync(index, entityId, eventType);
+						});
+						chart.onSymbolChanged().subscribe(null, function (info) {
+							updateChartSelectors();
+							if (windowTitle) {
+								windowTitle.textContent = 'CHART ' + (index + 1) + ' · ' + displaySymbol(info.ticker || info.name);
+							}
+							synchronizeAllDrawings();
+							if (index !== activeWidgetIndex) { return; }
+							var symbol = info.ticker || info.name;
+							clearExecutionMarkers();
+							updateSymbol(symbol);
+							if (!tickTape.hidden) { startTickTape(symbol); }
+							if (paperSnapshot) {
+								renderPaperAccount(paperSnapshot);
+								drawExecutionMarkers(paperSnapshot.history, symbol);
+							}
+						});
+						chart.onDataLoaded().subscribe(null, function () {
+							var previousNames = [
+								"Average Hourly & 4-Hour Range Bands",
+								"Average Hourly Range Bands",
+								"IV WALLS[D + W + H + 4H]",
+							];
+							var studies = chart.getAllStudies();
+							studies.forEach(function (study) {
+								if (previousNames.indexOf(study.name) !== -1) {
+									chart.removeEntity(study.id);
+								}
+							});
+							if (!studies.some(function (study) { return study.name === "NY 18:00 Hourly & 4-Hour Range Bands"; })) {
+								chart.createStudy("NY 18:00 Hourly & 4-Hour Range Bands", false, false)
+									.catch(function (error) { console.error('Unable to add hourly range bands:', error); });
+							}
+						}, true);
+						try {
+							var savedLayout = localStorage.getItem(chartStateStorageKey(index));
+							if (savedLayout) {
+								await chartWidget.load(JSON.parse(savedLayout));
+							}
+						} catch (error) {
+							console.error('Unable to restore saved chart layout:', error);
+						}
+						readyChartIndexes.add(index);
+						synchronizeAllDrawings();
+						if (pendingSymbols.has(index)) {
+							var pendingSymbol = pendingSymbols.get(index);
+							pendingSymbols.delete(index);
+							chart.setSymbol(pendingSymbol);
+						}
+						updateChartSelectors();
+						if (index === activeWidgetIndex) {
+							widget = chartWidget;
+							window.tvWidget = chartWidget;
+							activeSymbol = chart.symbol();
+							updateSymbol(activeSymbol);
+						}
+						if (!unsubscribePaperAccount) {
+							unsubscribePaperAccount = paperBroker.subscribeAccount(function (snapshot) {
+								paperSnapshot = snapshot;
+								renderPaperAccount(snapshot);
+								drawExecutionMarkers(snapshot.history, activeSymbol);
+							});
+						}
+					});
 				}
 
 				function saveWatchlist() {
@@ -605,12 +1319,94 @@
 					setWatchSearchOpen(watchSearchWrap.hidden);
 				});
 				document.addEventListener('keydown', function (event) {
+					var target = event.target;
+					var isTextEntry = target instanceof HTMLElement &&
+						(target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName));
+					if ((event.key === '/' && !isTextEntry) ||
+						((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k')) {
+						event.preventDefault();
+						openCommandPalette();
+						return;
+					}
+					if (event.key === 'Escape' && !commandPalette.hidden) {
+						closeCommandPalette();
+						return;
+					}
 					if (event.key === 'Escape' && !watchSearchWrap.hidden) { setWatchSearchOpen(false); }
 					if (event.key === 'Escape' && !tickTape.hidden) {
 						setTickTapeOpen(false);
 						tickTapeToggle.focus();
 					}
 				});
+
+				var workspaceCommands = [
+					{ command: '/chart', title: 'New chart', detail: 'Open a chart window', run: addChartWindow },
+					{ command: '/news', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
+					{ command: '/calendar', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
+				];
+
+				function renderCommandResults() {
+					var query = commandInput.value.trim().toLowerCase();
+					commandResults.replaceChildren();
+					workspaceCommands.filter(function (item) {
+						return !query || item.command.startsWith(query) ||
+							item.title.toLowerCase().includes(query.replace(/^\//, ''));
+					}).forEach(function (item) {
+						var result = document.createElement('button');
+						result.type = 'button';
+						result.className = 'command-result';
+						result.innerHTML = '<kbd></kbd><span><strong></strong><small></small></span><i>↵</i>';
+						result.querySelector('kbd').textContent = item.command;
+						result.querySelector('strong').textContent = item.title;
+						result.querySelector('small').textContent = item.detail;
+						result.addEventListener('click', function () { runWorkspaceCommand(item); });
+						commandResults.append(result);
+					});
+				}
+
+				function openCommandPalette() {
+					commandPalette.hidden = false;
+					commandInput.value = '/';
+					renderCommandResults();
+					commandInput.focus();
+				}
+
+				function closeCommandPalette() {
+					commandPalette.hidden = true;
+					commandInput.value = '';
+				}
+
+				function runWorkspaceCommand(command) {
+					closeCommandPalette();
+					command.run();
+				}
+
+				commandInput.addEventListener('input', renderCommandResults);
+				commandInput.addEventListener('keydown', function (event) {
+					if (event.key === 'Escape') {
+						closeCommandPalette();
+					} else if (event.key === 'Enter') {
+						event.preventDefault();
+						var requestedCommand = commandInput.value.trim().toLowerCase();
+						var exactCommand = workspaceCommands.find(function (item) {
+							return item.command === requestedCommand;
+						});
+						var firstResult = commandResults.querySelector('.command-result');
+						if (exactCommand) { runWorkspaceCommand(exactCommand); }
+						else if (firstResult) { firstResult.click(); }
+					} else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+						event.preventDefault();
+						var results = Array.from(commandResults.querySelectorAll('.command-result'));
+						if (!results.length) { return; }
+						var selected = results.indexOf(document.activeElement);
+						var increment = event.key === 'ArrowDown' ? 1 : -1;
+						results[(selected + increment + results.length) % results.length].focus();
+					}
+				});
+				commandPalette.addEventListener('mousedown', function (event) {
+					if (event.target === commandPalette) { closeCommandPalette(); }
+				});
+				document.getElementById('command-palette-toggle').addEventListener('click', openCommandPalette);
 
 				function searchSymbols(query) {
 					if (!query) {
@@ -647,111 +1443,148 @@
 					}
 				});
 
-				function applyTheme(theme, persist) {
-					document.documentElement.dataset.theme = theme;
-					document.querySelector('meta[name="theme-color"]').content = theme === 'dark' ? '#12191b' : '#edf1e9';
-					if (persist) { localStorage.setItem('lse-theme', theme); }
-					if (widgetReady) { widget.changeTheme(theme); }
-				}
-
-				themeSelect.addEventListener('change', function () { applyTheme(themeSelect.value, true); });
-
-				var wallpaperOpacityControl = document.getElementById('wallpaper-opacity-control');
-				var wallpaperOpacityInput = document.getElementById('wallpaper-opacity');
-				var wallpaperOpacityOutput = document.getElementById('wallpaper-opacity-value');
-				var clearWallpaperButton = document.getElementById('clear-wallpaper');
-
-				function applyWallpaperOpacity(value, persist) {
-					var opacity = Number(value);
-					if (!Number.isFinite(opacity)) { opacity = 18; }
-					opacity = Math.round(Math.max(0, Math.min(100, opacity)));
-					document.documentElement.style.setProperty('--wallpaper-overlay-opacity', (100 - opacity) + '%');
-					wallpaperOpacityInput.value = String(opacity);
-					wallpaperOpacityOutput.textContent = opacity + '%';
-					if (persist) {
-						try { localStorage.setItem('lse-wallpaper-opacity', String(opacity)); }
-						catch (error) { document.getElementById('ui-status').textContent = 'Opacity applied for this session'; }
-					}
-				}
-
-				wallpaperOpacityInput.addEventListener('input', function () {
-					applyWallpaperOpacity(wallpaperOpacityInput.value, true);
-				});
-
-				function applyWallpaper(image, persist) {
-					document.documentElement.style.setProperty('--wallpaper-image', image ? 'url("' + image + '")' : 'none');
-					document.documentElement.classList.toggle('has-wallpaper', Boolean(image));
-					wallpaperOpacityControl.hidden = !image;
-					clearWallpaperButton.hidden = !image;
-					document.getElementById('ui-status').textContent = image ? 'CUSTOM BACKGROUND' : 'HISTORY + LIVE TICKS';
-					if (persist) {
-						try { localStorage.setItem('lse-wallpaper', image || ''); }
-						catch (error) { document.getElementById('ui-status').textContent = 'Image applied for this session'; }
-					}
-				}
-
-				var savedWallpaperOpacity = localStorage.getItem('lse-wallpaper-opacity');
-				applyWallpaperOpacity(savedWallpaperOpacity === null ? 18 : savedWallpaperOpacity, false);
-				var savedWallpaper = localStorage.getItem('lse-wallpaper');
-				if (savedWallpaper) { applyWallpaper(savedWallpaper, false); }
-				document.getElementById('wallpaper-input').addEventListener('change', function (event) {
-					var file = event.target.files && event.target.files[0];
-					if (!file || !file.type.startsWith('image/')) { return; }
-					var reader = new FileReader();
-					reader.onload = function () { applyWallpaper(reader.result, true); };
-					reader.readAsDataURL(file);
-				});
-				document.getElementById('clear-wallpaper').addEventListener('click', function () { applyWallpaper('', true); });
-
-				widget.onChartReady(async function () {
-					widgetReady = true;
-					var chart = widget.activeChart();
-					widget.subscribe('onAutoSaveNeeded', saveChartLayout);
-					chart.onSymbolChanged().subscribe(null, function (info) {
-						var symbol = info.ticker || info.name;
-						clearExecutionMarkers();
-						updateSymbol(symbol);
-						if (!tickTape.hidden) { startTickTape(symbol); }
-						if (paperSnapshot) {
-							renderPaperAccount(paperSnapshot);
-							drawExecutionMarkers(paperSnapshot.history, symbol);
-						}
+				function renderEconomicCalendar(theme, container) {
+					container.replaceChildren();
+					var widgetRoot = document.createElement('div');
+					widgetRoot.className = 'tradingview-widget-container__widget';
+					var script = document.createElement('script');
+					script.type = 'text/javascript';
+					script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-events.js';
+					script.async = true;
+					script.textContent = JSON.stringify({
+						colorTheme: theme,
+						isTransparent: true,
+						width: '100%',
+						height: '320',
+						locale: 'en',
+						importanceFilter: '-1,0,1',
+						countryFilter: 'us',
 					});
-					chart.onDataLoaded().subscribe(null, function () {
-						var previousNames = [
-							"Average Hourly & 4-Hour Range Bands",
-							"Average Hourly Range Bands",
-							"IV WALLS[D + W + H + 4H]",
-						];
-						var studies = chart.getAllStudies();
-						studies.forEach(function (study) {
-							if (previousNames.indexOf(study.name) !== -1) {
-								chart.removeEntity(study.id);
+					container.append(widgetRoot, script);
+				}
+
+				function openEconomicCalendarWindow() {
+					if (calendarAppWindow) {
+						calendarAppWindow.classList.remove('is-minimized');
+						calendarAppWindow.hidden = false;
+						calendarAppWindow.style.zIndex = String(nextCanvasZIndex());
+						return;
+					}
+					var bounds = chartGrid.getBoundingClientRect();
+					var appWindow = document.createElement('section');
+					appWindow.className = 'canvas-app-window calendar-app-window';
+					appWindow.setAttribute('aria-label', 'Economic calendar');
+					appWindow.style.left = Math.max(12, (bounds.width - 560) / 2) + 'px';
+					appWindow.style.top = Math.max(12, (bounds.height - 500) / 2) + 'px';
+					appWindow.style.width = Math.min(560, Math.max(320, bounds.width - 24)) + 'px';
+					appWindow.style.height = Math.min(500, Math.max(260, bounds.height - 24)) + 'px';
+					appWindow.style.zIndex = String(nextCanvasZIndex());
+					var titlebar = document.createElement('div');
+					titlebar.className = 'chart-window-titlebar calendar-window-titlebar';
+					titlebar.innerHTML = '<strong>ECONOMIC CALENDAR</strong><div class="chart-window-actions"></div>';
+					var closeButton = document.createElement('button');
+					closeButton.type = 'button';
+					closeButton.className = 'chart-window-button chart-window-close';
+					closeButton.setAttribute('aria-label', 'Close economic calendar');
+					closeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg>';
+					closeButton.addEventListener('click', function () {
+						appWindow.remove();
+						calendarAppWindow = null;
+					});
+					titlebar.querySelector('.chart-window-actions').append(closeButton);
+					var content = document.createElement('div');
+					content.className = 'calendar-window-content';
+					var widget = document.createElement('div');
+					widget.className = 'tradingview-widget-container';
+					content.append(widget);
+					appWindow.append(titlebar, content);
+					appWindow.addEventListener('pointerdown', function () {
+						appWindow.style.zIndex = String(nextCanvasZIndex());
+					});
+					titlebar.addEventListener('pointerdown', function (event) {
+						if (event.button !== 0 || event.target.closest('button')) { return; }
+						event.preventDefault();
+						appWindow.style.zIndex = String(nextCanvasZIndex());
+						titlebar.setPointerCapture(event.pointerId);
+						var startX = event.clientX;
+						var startY = event.clientY;
+						var startLeft = appWindow.offsetLeft;
+						var startTop = appWindow.offsetTop;
+						var dragFinished = false;
+						function moveAppWindow(moveEvent) {
+							if (moveEvent.pointerId !== event.pointerId) { return; }
+							if ((moveEvent.buttons & 1) === 0) {
+								finishMove();
+								return;
 							}
-						});
-						if (!studies.some(function (study) { return study.name === "NY 18:00 Hourly & 4-Hour Range Bands"; })) {
-							chart.createStudy("NY 18:00 Hourly & 4-Hour Range Bands", false, false)
-								.catch(function (error) { console.error('Unable to add hourly range bands:', error); });
+							appWindow.style.left = Math.max(0, startLeft + moveEvent.clientX - startX) + 'px';
+							appWindow.style.top = Math.max(0, startTop + moveEvent.clientY - startY) + 'px';
 						}
-					}, true);
-					try {
-						var savedLayout = localStorage.getItem(chartLayoutStorageKey);
-						if (savedLayout) {
-							await widget.load(JSON.parse(savedLayout));
+						function finishMove() {
+							if (dragFinished) { return; }
+							dragFinished = true;
+							window.removeEventListener('pointermove', moveAppWindow);
+							window.removeEventListener('pointerup', finishMove);
+							window.removeEventListener('pointercancel', finishMove);
+							if (titlebar.hasPointerCapture(event.pointerId)) {
+								titlebar.releasePointerCapture(event.pointerId);
+							}
 						}
-					} catch (error) {
-						console.error('Unable to restore saved chart layout:', error);
-					}
-					activeSymbol = chart.symbol();
-					updateSymbol(activeSymbol);
-					unsubscribePaperAccount = paperBroker.subscribeAccount(function (snapshot) {
-						paperSnapshot = snapshot;
-						renderPaperAccount(snapshot);
-						drawExecutionMarkers(snapshot.history, activeSymbol);
+						window.addEventListener('pointermove', moveAppWindow);
+						window.addEventListener('pointerup', finishMove);
+						window.addEventListener('pointercancel', finishMove);
 					});
-					chartLayoutReady = true;
-					renderWatchlist();
+					chartGrid.append(appWindow);
+					calendarAppWindow = appWindow;
+					renderEconomicCalendar(initialTheme, widget);
+				}
+
+				addChartButton.addEventListener('click', addChartWindow);
+				activeChartSelect.addEventListener('change', function () {
+					setActiveChartWidget(Number(activeChartSelect.value));
 				});
+				var drawingSyncToggle = document.getElementById('drawing-sync-toggle');
+				drawingSyncToggle.checked = drawingSyncEnabled;
+				drawingSyncToggle.addEventListener('change', function () {
+					drawingSyncEnabled = drawingSyncToggle.checked;
+					try {
+						localStorage.setItem(drawingSyncStorageKey, String(drawingSyncEnabled));
+					} catch (error) {
+						console.error('Unable to save drawing sync preference:', error);
+					}
+					if (drawingSyncEnabled) {
+						synchronizeAllDrawings();
+					} else {
+						clearDrawingMirrors();
+					}
+				});
+				function setWatchlistHidden(hidden, persist) {
+					document.querySelector('.terminal-grid').classList.toggle('is-watchlist-hidden', hidden);
+					watchlistToggle.setAttribute('aria-expanded', String(!hidden));
+					watchlistToggle.title = hidden ? 'Show watchlist' : 'Hide watchlist';
+					watchlistToggle.querySelector('span').textContent = hidden ? 'SHOW WATCHLIST' : 'WATCHLIST';
+					watchlistPanel.setAttribute('aria-hidden', String(hidden));
+					watchlistPanel.inert = hidden;
+					if (persist) {
+						try {
+							localStorage.setItem(watchlistToggleStorageKey, String(hidden));
+						} catch (error) {
+							console.error('Unable to save watchlist visibility:', error);
+						}
+					}
+				}
+				watchlistToggle.addEventListener('click', function () {
+					setWatchlistHidden(watchlistToggle.getAttribute('aria-expanded') === 'true', true);
+				});
+				setWatchlistHidden(localStorage.getItem(watchlistToggleStorageKey) === 'true', false);
+
+				renderWatchlist();
+				visibleChartIndexes.forEach(function (index) {
+					ensureChartWidget(index);
+				});
+				if (visibleChartIndexes.length) { setChartWindowActive(visibleChartIndexes[0]); }
+				updateChartSelectors();
+				saveChartDesktop();
 				window.addEventListener('pagehide', function () {
 					clearExecutionMarkers();
 					if (unsubscribePaperAccount) { unsubscribePaperAccount(); }
@@ -768,7 +1601,20 @@
 		<div class="desk-shell">
 			<div class="terminal-grid">
 				<main class="chart-workspace">
-					<div class="chart-frame"><div id="tv_chart_container"></div></div>
+					<div class="chart-layout-bar" aria-label="Chart layout controls">
+						<button id="add-chart-window" class="workspace-action-button" type="button" aria-label="Add chart" title="Add chart"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span>CHART</span></button>
+						<button id="command-palette-toggle" class="workspace-action-button command-open-button" type="button" aria-label="Open command palette" title="Command palette (/)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4-3 4 3 4m4-8 3 4-3 4"/></svg><span>COMMAND</span><kbd>/</kbd></button>
+						<label for="active-chart-select">ACTIVE CHART
+							<select id="active-chart-select" aria-label="Active chart"></select>
+						</label>
+						<label class="drawing-sync-control" for="drawing-sync-toggle" title="Synchronize drawings across matching charts">
+							<input id="drawing-sync-toggle" type="checkbox">
+							<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.2 5.3 3.8 6.7a2.1 2.1 0 0 0 3 3l1.1-1.1m.9-1.9 1.4-1.4a2.1 2.1 0 0 0-3-3L6.1 3.4m-2.7 8.8 9.2-9.2"/></svg><span>SYNC</span>
+						</label>
+						<button id="watchlist-toggle" class="watchlist-slide-toggle" type="button" aria-expanded="true" aria-controls="watchlist-panel"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1"/><path d="M9.5 3v10"/></svg><span>WATCHLIST</span></button>
+						<span id="chart-layout-status" role="status" aria-live="polite"></span>
+					</div>
+					<div class="chart-frame"><div id="chart-grid"></div></div>
 					<section id="paper-trading-panel" class="paper-trading-panel" aria-label="Paper trading">
 						<div class="paper-panel-heading">
 							<div class="paper-panel-title">
@@ -810,29 +1656,16 @@
 						</div>
 					</section>
 				</main>
-				<aside class="watchlist-panel" aria-label="Watchlist">
+				<aside id="watchlist-panel" class="watchlist-panel" aria-label="Watchlist">
 					<div class="watchlist-tools">
-						<label class="theme-control" for="theme-select"><span>THEME</span><select id="theme-select" aria-label="Chart theme"><option value="dark">Dark</option><option value="light">Light</option></select></label>
-						<details class="wallpaper-menu">
-							<summary class="tool-button">Wallpaper</summary>
-							<div class="wallpaper-menu-panel">
-								<label class="wallpaper-file-button" for="wallpaper-input">Choose image</label>
-								<input id="wallpaper-input" type="file" accept="image/*" hidden>
-								<div id="wallpaper-opacity-control" class="wallpaper-opacity-control" hidden>
-									<label for="wallpaper-opacity">IMAGE OPACITY</label>
-									<output id="wallpaper-opacity-value" for="wallpaper-opacity">18%</output>
-									<input id="wallpaper-opacity" type="range" min="0" max="100" step="1" value="18" aria-label="Wallpaper image opacity">
-								</div>
-								<button id="clear-wallpaper" class="wallpaper-reset" type="button" hidden>Remove image</button>
-							</div>
-						</details>
+						<span class="watchlist-live-label"><i></i> LIVE</span>
 					</div>
 					<div class="panel-heading">
 						<div><span class="section-index">01</span><h2>Watchlist</h2></div>
 						<div class="panel-heading-actions">
 							<span id="watch-count" class="watch-count">03</span>
-							<button id="tick-tape-toggle" class="tick-tape-toggle" type="button" title="Open live tick tape for current chart symbol" aria-label="Open live tick tape for current chart symbol" aria-expanded="false" aria-controls="tick-tape">TAPE</button>
-							<button id="watch-search-toggle" class="watch-add-toggle" type="button" title="Add symbol" aria-label="Add symbol" aria-expanded="false" aria-controls="watch-search-wrap">+</button>
+							<button id="tick-tape-toggle" class="tick-tape-toggle" type="button" title="Open live tick tape for current chart symbol" aria-label="Open live tick tape for current chart symbol" aria-expanded="false" aria-controls="tick-tape"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 11.5h2l2-7 3 9 2-5h2"/></svg></button>
+							<button id="watch-search-toggle" class="watch-add-toggle" type="button" title="Add symbol" aria-label="Add symbol" aria-expanded="false" aria-controls="watch-search-wrap"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
 						</div>
 					</div>
 					<section id="tick-tape" class="tick-tape" aria-label="Live tick tape" hidden>
@@ -852,6 +1685,14 @@
 					<div class="watchlist-foot"><span class="feed-mark"></span><span id="ui-status">HISTORY + LIVE TICKS</span></div>
 				</aside>
 			</div>
+		</div>
+		<div id="command-palette" class="command-palette-overlay" hidden>
+			<section class="command-palette" role="dialog" aria-modal="true" aria-labelledby="command-palette-title">
+				<label id="command-palette-title" class="command-palette-label" for="command-palette-input">COMMAND</label>
+				<div class="command-palette-entry"><span>›</span><input id="command-palette-input" type="text" autocomplete="off" spellcheck="false" placeholder="Type a command, e.g. /chart"></div>
+				<div id="command-palette-results" class="command-palette-results" role="list"></div>
+				<footer><span>↑ ↓ SELECT</span><span>ENTER RUN</span><span>ESC CLOSE</span></footer>
+			</section>
 		</div>
 	</body>
 

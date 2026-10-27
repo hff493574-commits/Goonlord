@@ -148,6 +148,31 @@
 		this.ensureStream(symbolInfo.ticker, state.lastTickTime);
 	};
 
+	LSELiveDatafeed.prototype.createClient = function (clientId) {
+		var datafeed = this;
+		var listenerIds = new Map();
+		var prefix = "chart-" + String(clientId) + ":";
+		return {
+			onReady: datafeed.onReady.bind(datafeed),
+			searchSymbols: datafeed.searchSymbols.bind(datafeed),
+			resolveSymbol: datafeed.resolveSymbol.bind(datafeed),
+			getBars: datafeed.getBars.bind(datafeed),
+			subscribeBars: function (symbolInfo, resolution, onTick, listenerGuid) {
+				var previousId = listenerIds.get(listenerGuid);
+				if (previousId) { datafeed.unsubscribeBars(previousId); }
+				var namespacedId = prefix + listenerGuid;
+				listenerIds.set(listenerGuid, namespacedId);
+				datafeed.subscribeBars(symbolInfo, resolution, onTick, namespacedId);
+			},
+			unsubscribeBars: function (listenerGuid) {
+				var namespacedId = listenerIds.get(listenerGuid);
+				if (!namespacedId) { return; }
+				listenerIds.delete(listenerGuid);
+				datafeed.unsubscribeBars(namespacedId);
+			},
+		};
+	};
+
 	LSELiveDatafeed.prototype.unsubscribeBars = function (listenerGuid) {
 		var subscription = this.subscriptions.get(listenerGuid);
 		if (subscription) {
