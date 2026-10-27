@@ -10,7 +10,7 @@
 		<link rel="preconnect" href="https://fonts.googleapis.com">
 		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 		<link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-		<link rel="stylesheet" href="dashboard.css?v=20261027-8">
+		<link rel="stylesheet" href="dashboard.css?v=20261027-9">
 
 		<script type="text/javascript" src="charting_library/charting_library.standalone.js"></script>
 		<script type="text/javascript" src="datafeeds/lse-live-datafeed.js?v=20261027-3"></script>
@@ -28,7 +28,16 @@
 
 			function initOnReady() {
 				var datafeedUrl = window.location.origin;
-				var initialTheme = 'dark';
+				var themePresets = [
+					{ id: 'obsidian', title: 'Obsidian', detail: 'Pure black with muted sage accents' },
+					{ id: 'midnight', title: 'Midnight', detail: 'Deep navy with cool blue accents' },
+					{ id: 'graphite', title: 'Graphite', detail: 'Neutral charcoal with silver accents' },
+					{ id: 'forest', title: 'Forest', detail: 'Black pine with restrained green accents' },
+					{ id: 'plum', title: 'Plum', detail: 'Near-black violet with soft lilac accents' },
+				];
+				var savedTheme = localStorage.getItem('lse-theme');
+				var initialTheme = themePresets.some(function (theme) { return theme.id === savedTheme; }) ?
+					savedTheme : 'obsidian';
 				var chartLayoutStorageKey = 'lse-chart-layout-v1';
 				var chartGridStorageKey = 'lse-chart-desktop-v1';
 				var chartGrid = document.getElementById('chart-grid');
@@ -37,7 +46,6 @@
 				var commandInput = document.getElementById('command-palette-input');
 				var commandResults = document.getElementById('command-palette-results');
 				var activeChartSelect = document.getElementById('active-chart-select');
-				var watchlistToggle = document.getElementById('watchlist-toggle');
 				var watchlistToggleStorageKey = 'lse-watchlist-hidden-v1';
 				var watchlistPanel = document.querySelector('.watchlist-panel');
 				var chartWidgets = [];
@@ -109,12 +117,12 @@
 					custom_indicators_getter: function (PineJS) {
 						return Promise.resolve([window.AverageHourlyRangeBands(PineJS)]);
 					},
-					theme: initialTheme,
+					theme: 'Dark',
 					overrides: {
 						"paneProperties.backgroundType": "solid",
-						"paneProperties.background": initialTheme === 'dark' ? 'rgba(11, 16, 18, 0)' : 'rgba(250, 251, 247, 0)',
-						"paneProperties.vertGridProperties.color": initialTheme === 'dark' ? 'rgba(178, 194, 186, 0.10)' : 'rgba(65, 82, 70, 0.10)',
-						"paneProperties.horzGridProperties.color": initialTheme === 'dark' ? 'rgba(178, 194, 186, 0.10)' : 'rgba(65, 82, 70, 0.10)',
+						"paneProperties.background": 'rgba(11, 16, 18, 0)',
+						"paneProperties.vertGridProperties.color": 'rgba(178, 194, 186, 0.10)',
+						"paneProperties.horzGridProperties.color": 'rgba(178, 194, 186, 0.10)',
 					},
 					charts_storage_url: 'https://saveload.tradingview.com',
 					charts_storage_api_version: "1.1",
@@ -668,16 +676,7 @@
 					minimizeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.5h10"/></svg>';
 					minimizeButton.addEventListener('click', function (event) {
 						event.stopPropagation();
-						if (cell.classList.contains('is-minimized')) {
-							cell.classList.remove('is-minimized');
-							applyChartWindowRect(cell, chartWindowRects[index] || defaultChartRect(index));
-						} else {
-							chartWindowRects[index] = readChartWindowRect(cell);
-							cell.classList.add('is-minimized');
-						}
-						minimizeButton.setAttribute('aria-label',
-							(cell.classList.contains('is-minimized') ? 'Restore chart ' : 'Minimize chart ') + (index + 1));
-						saveChartDesktop();
+						toggleChartMinimized(index, cell, minimizeButton);
 					});
 					var maximizeButton = document.createElement('button');
 					maximizeButton.type = 'button';
@@ -708,9 +707,16 @@
 					if (minimizedChartIndexes.includes(index)) {
 						cell.classList.add('is-minimized');
 						minimizeButton.setAttribute('aria-label', 'Restore chart ' + (index + 1));
+						minimizeButton.title = 'Restore chart';
+						minimizeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M8 3v10"/></svg>';
 					}
 					actions.append(minimizeButton, maximizeButton, closeButton);
 					cell.append(titlebar);
+					titlebar.addEventListener('click', function (event) {
+						if (cell.classList.contains('is-minimized') && !event.target.closest('button')) {
+							restoreChartWindow(index, cell, minimizeButton);
+						}
+					});
 					var container = document.createElement('div');
 					container.id = 'tv_chart_container_' + index;
 					container.className = 'chart-window-content';
@@ -731,7 +737,8 @@
 					});
 					titlebar.addEventListener('pointerdown', function (event) {
 						if (event.button !== 0 || event.target.closest('button') ||
-							cell.classList.contains('is-maximized')) { return; }
+							cell.classList.contains('is-maximized') ||
+							cell.classList.contains('is-minimized')) { return; }
 						event.preventDefault();
 						titlebar.setPointerCapture(event.pointerId);
 						setChartWindowActive(index);
@@ -811,6 +818,31 @@
 					cell.style.top = y + 'px';
 					cell.style.width = width + 'px';
 					cell.style.height = height + 'px';
+				}
+
+				function toggleChartMinimized(index, cell, button) {
+					if (cell.classList.contains('is-minimized')) {
+						restoreChartWindow(index, cell, button);
+						return;
+					}
+					chartWindowRects[index] = readChartWindowRect(cell);
+					cell.classList.remove('is-maximized');
+					cell.classList.add('is-minimized');
+					button.setAttribute('aria-label', 'Restore chart ' + (index + 1));
+					button.title = 'Restore chart';
+					button.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M8 3v10"/></svg>';
+					saveChartDesktop();
+				}
+
+				function restoreChartWindow(index, cell, button) {
+					cell.classList.remove('is-minimized', 'is-maximized');
+					applyChartWindowRect(cell, chartWindowRects[index] || defaultChartRect(index));
+					cell.style.zIndex = String(nextCanvasZIndex());
+					button.setAttribute('aria-label', 'Minimize chart ' + (index + 1));
+					button.title = 'Minimize chart';
+					button.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.5h10"/></svg>';
+					setChartWindowActive(index);
+					saveChartDesktop();
 				}
 
 				function beginChartWindowResize(index, cell, direction, event) {
@@ -994,9 +1026,6 @@
 						var windowTitle = document.querySelector('#chart-cell-' + index + ' .chart-window-titlebar strong');
 						if (windowTitle) {
 							windowTitle.textContent = 'CHART ' + (index + 1) + ' · ' + displaySymbol(chart.symbol());
-						}
-						if (document.documentElement.dataset.theme !== initialTheme) {
-							chartWidget.changeTheme(document.documentElement.dataset.theme);
 						}
 						chartWidget.subscribe('onAutoSaveNeeded', function () {
 							saveChartLayout(chartWidget, index);
@@ -1339,11 +1368,54 @@
 					}
 				});
 
+				function restoreMinimizedCharts() {
+					var restored = 0;
+					visibleChartIndexes.forEach(function (index) {
+						var cell = document.getElementById('chart-cell-' + index);
+						var button = cell && cell.querySelector('.chart-window-actions .chart-window-button');
+						if (cell && button && cell.classList.contains('is-minimized')) {
+							restoreChartWindow(index, cell, button);
+							restored += 1;
+						}
+					});
+					if (!restored) { document.getElementById('chart-layout-status').textContent = 'NO MINIMIZED CHARTS'; }
+				}
+
+				function setWorkspaceTheme(themeId) {
+					if (!themePresets.some(function (theme) { return theme.id === themeId; })) { return; }
+					document.documentElement.dataset.theme = themeId;
+					document.querySelector('meta[name="theme-color"]').content =
+						themeId === 'midnight' ? '#080d18' :
+						themeId === 'graphite' ? '#101112' :
+						themeId === 'forest' ? '#08110e' :
+						themeId === 'plum' ? '#110d15' : '#070809';
+					try {
+						localStorage.setItem('lse-theme', themeId);
+					} catch (error) {
+						console.error('Unable to save theme preference:', error);
+					}
+					if (calendarAppWindow) {
+						var calendarWidget = calendarAppWindow.querySelector('.tradingview-widget-container');
+						if (calendarWidget) { renderEconomicCalendar('dark', calendarWidget); }
+					}
+				}
+
 				var workspaceCommands = [
 					{ command: '/chart', title: 'New chart', detail: 'Open a chart window', run: addChartWindow },
+					{ command: '/charts', title: 'Restore minimized charts', detail: 'Bring minimized charts back to the canvas', run: restoreMinimizedCharts },
+					{ command: '/watchlist', title: 'Show watchlist', detail: 'Open the watchlist panel', run: function () { setWatchlistHidden(false, true); } },
+					{ command: '/watchlist hide', title: 'Hide watchlist', detail: 'Close the watchlist panel', run: function () { setWatchlistHidden(true, true); } },
 					{ command: '/news', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
 					{ command: '/calendar', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
 				];
+				themePresets.forEach(function (theme) {
+					workspaceCommands.push({
+						command: '/theme ' + theme.id,
+						title: theme.title + ' theme',
+						detail: theme.detail,
+						run: function () { setWorkspaceTheme(theme.id); },
+					});
+				});
 
 				function renderCommandResults() {
 					var query = commandInput.value.trim().toLowerCase();
@@ -1407,6 +1479,9 @@
 					if (event.target === commandPalette) { closeCommandPalette(); }
 				});
 				document.getElementById('command-palette-toggle').addEventListener('click', openCommandPalette);
+				document.getElementById('watchlist-close').addEventListener('click', function () {
+					setWatchlistHidden(true, true);
+				});
 
 				function searchSymbols(query) {
 					if (!query) {
@@ -1560,9 +1635,6 @@
 				});
 				function setWatchlistHidden(hidden, persist) {
 					document.querySelector('.terminal-grid').classList.toggle('is-watchlist-hidden', hidden);
-					watchlistToggle.setAttribute('aria-expanded', String(!hidden));
-					watchlistToggle.title = hidden ? 'Show watchlist' : 'Hide watchlist';
-					watchlistToggle.querySelector('span').textContent = hidden ? 'SHOW WATCHLIST' : 'WATCHLIST';
 					watchlistPanel.setAttribute('aria-hidden', String(hidden));
 					watchlistPanel.inert = hidden;
 					if (persist) {
@@ -1573,10 +1645,7 @@
 						}
 					}
 				}
-				watchlistToggle.addEventListener('click', function () {
-					setWatchlistHidden(watchlistToggle.getAttribute('aria-expanded') === 'true', true);
-				});
-				setWatchlistHidden(localStorage.getItem(watchlistToggleStorageKey) === 'true', false);
+				setWatchlistHidden(true, false);
 
 				renderWatchlist();
 				visibleChartIndexes.forEach(function (index) {
@@ -1611,7 +1680,6 @@
 							<input id="drawing-sync-toggle" type="checkbox">
 							<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.2 5.3 3.8 6.7a2.1 2.1 0 0 0 3 3l1.1-1.1m.9-1.9 1.4-1.4a2.1 2.1 0 0 0-3-3L6.1 3.4m-2.7 8.8 9.2-9.2"/></svg><span>SYNC</span>
 						</label>
-						<button id="watchlist-toggle" class="watchlist-slide-toggle" type="button" aria-expanded="true" aria-controls="watchlist-panel"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2.5" y="3" width="11" height="10" rx="1"/><path d="M9.5 3v10"/></svg><span>WATCHLIST</span></button>
 						<span id="chart-layout-status" role="status" aria-live="polite"></span>
 					</div>
 					<div class="chart-frame"><div id="chart-grid"></div></div>
@@ -1666,6 +1734,7 @@
 							<span id="watch-count" class="watch-count">03</span>
 							<button id="tick-tape-toggle" class="tick-tape-toggle" type="button" title="Open live tick tape for current chart symbol" aria-label="Open live tick tape for current chart symbol" aria-expanded="false" aria-controls="tick-tape"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 11.5h2l2-7 3 9 2-5h2"/></svg></button>
 							<button id="watch-search-toggle" class="watch-add-toggle" type="button" title="Add symbol" aria-label="Add symbol" aria-expanded="false" aria-controls="watch-search-wrap"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
+							<button id="watchlist-close" class="watch-add-toggle" type="button" title="Hide watchlist" aria-label="Hide watchlist"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg></button>
 						</div>
 					</div>
 					<section id="tick-tape" class="tick-tape" aria-label="Live tick tape" hidden>
