@@ -242,12 +242,12 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
             "width_seconds": str(base_seconds),
             "n": limit,
             "before": datetime.fromtimestamp(to_epoch, timezone.utc).isoformat(),
-            "from_ts": None,
-            "to_ts": None,
+            "from_ts": datetime.fromtimestamp(from_epoch, timezone.utc).isoformat(),
+            "to_ts": datetime.fromtimestamp(to_epoch, timezone.utc).isoformat(),
         })
 
         bars = sorted((self.row_to_bar(row) for row in rows), key=lambda bar: bar["time"])
-        bars = [bar for bar in bars if bar["time"] <= to_epoch]
+        bars = [bar for bar in bars if from_epoch <= bar["time"] <= to_epoch]
         if not bars:
             self.send_json({"s": "no_data"})
             return
@@ -263,6 +263,7 @@ class LSERequestHandler(SimpleHTTPRequestHandler):
                 live_interval,
             )
             bars = self.merge_bars(bars, live_bars)
+        bars = [bar for bar in bars if from_epoch <= bar["time"] <= to_epoch]
         bars = bars[-requested_limit:]
 
         result = {"s": "ok", "t": [], "o": [], "h": [], "l": [], "c": [], "v": []}

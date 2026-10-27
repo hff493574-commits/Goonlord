@@ -142,6 +142,45 @@ class LiveTickBrokerTests(unittest.TestCase):
         self.assertEqual(response["c"], [3])
         self.assertEqual(response["v"], [7])
 
+    def test_minute_history_respects_requested_time_range_for_pagination(self):
+        start = 1_798_000_000
+        end = start + 120
+        timestamps = [start - 60, start, start + 60, end, end + 60]
+        rows = [{
+            "timestamp": stamp,
+            "open": 100 + index,
+            "high": 101 + index,
+            "low": 99 + index,
+            "close": 100 + index,
+            "volume": 1,
+        } for index, stamp in enumerate(timestamps)]
+        broker = type("Broker", (), {
+            "history_bars": lambda _self, _symbol, _start, _end, _interval: [],
+        })()
+        handler = object.__new__(lse_datafeed.LSERequestHandler)
+        handler.live_broker = broker
+        response = {}
+        requested = {}
+
+        with patch.object(handler, "site_rpc", side_effect=lambda _name, payload: requested.update(payload) or rows), patch.object(
+            handler, "send_json", side_effect=lambda body, *_: response.update(body)
+        ):
+            handler.history({
+                "symbol": ["NQ.F"],
+                "resolution": ["1"],
+                "from": [str(start)],
+                "to": [str(end)],
+                "countback": ["10"],
+            })
+
+        self.assertEqual(requested["from_ts"], lse_datafeed.datetime.fromtimestamp(
+            start, lse_datafeed.timezone.utc
+        ).isoformat())
+        self.assertEqual(requested["to_ts"], lse_datafeed.datetime.fromtimestamp(
+            end, lse_datafeed.timezone.utc
+        ).isoformat())
+        self.assertEqual(response["t"], [start, start + 60, end])
+
     def test_maps_chart_aliases_to_provider_symbols(self):
         broker = lse_datafeed.LiveTickBroker("test-key")
         for symbol in ("NQ.F", "ES.F", "GC.F", "AAPL"):

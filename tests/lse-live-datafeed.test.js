@@ -103,38 +103,60 @@ test("RTH mode keeps only US equity regular-session intraday bars", async () => 
 		t: [
 			Date.parse("2026-10-26T13:00:00Z") / 1000,
 			Date.parse("2026-10-26T13:30:00Z") / 1000,
+			Date.parse("2026-10-26T20:14:00Z") / 1000,
 			Date.parse("2026-10-26T20:15:00Z") / 1000,
 		],
-		o: [1, 2, 3],
-		h: [1, 2, 3],
-		l: [1, 2, 3],
-		c: [1, 2, 3],
-		v: [1, 1, 1],
+		o: [1, 2, 3, 4],
+		h: [1, 2, 3, 4],
+		l: [1, 2, 3, 4],
+		c: [1, 2, 3, 4],
+		v: [1, 1, 1, 1],
 	};
 
 	const result = await new Promise((resolve, reject) => {
 		client.getBars(
 			{ ticker: "NQ.F" },
 			"60",
-			{ from: 0, to: fixedNow / 1000 + 1, countBack: 10 },
+			{ from: 0, to: Date.parse("2026-10-26T20:16:00Z") / 1000, countBack: 10 },
 			(bars) => resolve(bars),
 			reject,
 		);
 	});
 
-	assert.equal(result.length, 1);
+	assert.equal(result.length, 2);
 	assert.equal(result[0].time, Date.parse("2026-10-26T13:30:00Z"));
+	assert.equal(result[1].time, Date.parse("2026-10-26T20:14:00Z"));
 	client.setRegularHoursEnabled(false);
 	const extendedBars = await new Promise((resolve, reject) => {
 		client.getBars(
 			{ ticker: "NQ.F" },
 			"60",
-			{ from: 0, to: fixedNow / 1000 + 1, countBack: 10 },
+			{ from: 0, to: Date.parse("2026-10-26T20:16:00Z") / 1000, countBack: 10 },
 			(bars) => resolve(bars),
 			reject,
 		);
 	});
-	assert.equal(extendedBars.length, 3);
+	assert.equal(extendedBars.length, 4);
+});
+
+test("initial ETH history loads at least three days of minute candles", async () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const client = datafeed.createClient(41);
+	historyPayload = { s: "no_data" };
+	const end = fixedNow / 1000;
+
+	await new Promise((resolve, reject) => {
+		client.getBars(
+			{ ticker: "NQ.F" },
+			"1",
+			{ from: end - 1800, to: end, countBack: 300 },
+			resolve,
+			reject,
+		);
+	});
+
+	assert.equal(historyRequests.at(-1).searchParams.get("countback"), "4320");
+	assert.ok(Number(historyRequests.at(-1).searchParams.get("from")) <= end - 3 * 24 * 60 * 60);
 });
 
 test("RTH history requests enough bars to reach the previous regular session", async () => {
@@ -169,11 +191,11 @@ test("RTH history requests enough bars to reach the previous regular session", a
 
 	assert.equal(result.length, 1);
 	assert.equal(result[0].time, Date.parse("2026-10-26T13:30:00Z"));
-	assert.equal(historyRequests.at(-1).searchParams.get("countback"), "2402");
+	assert.equal(historyRequests.at(-1).searchParams.get("countback"), "4320");
 	assert.ok(Number(historyRequests.at(-1).searchParams.get("from")) < beforeOpen / 1000 - 3600);
 });
 
-test("RTH live candles align to the 09:30 New York session open across DST", () => {
+test("RTH live candles include the 16:14 minute and align to 09:30 across DST", () => {
 	const datafeed = new browser.LSELiveDatafeed("https://example.test");
 	const daylightState = {
 		currentBar: null,
@@ -210,6 +232,27 @@ test("RTH live candles align to the 09:30 New York session open across DST", () 
 	});
 
 	assert.equal(standardBar.time, Date.parse("2026-01-05T14:30:00Z"));
+	const lastRthMinute = datafeed.applyTick(
+		{ ...daylightState, currentBar: null, lastTickTime: 0 },
+		daylightState.duration,
+		{
+			timestamp_ms: Date.parse("2026-10-26T20:14:00Z"),
+			sequence: 1,
+			price: 20003,
+			volume: 1,
+		},
+	);
+	assert.equal(lastRthMinute.time, Date.parse("2026-10-26T19:30:00Z"));
+	assert.equal(datafeed.applyTick(
+		{ ...daylightState, currentBar: null, lastTickTime: 0 },
+		daylightState.duration,
+		{
+			timestamp_ms: Date.parse("2026-10-26T20:15:00Z"),
+			sequence: 1,
+			price: 20004,
+			volume: 1,
+		},
+	), null);
 });
 
 test("RTH subscriptions freeze out of session and resume on the next 09:30 ET tick", () => {
@@ -238,7 +281,7 @@ test("RTH subscriptions freeze out of session and resume on the next 09:30 ET ti
 	const closingBar = bars[0];
 
 	stream.onmessage({ data: JSON.stringify({
-		timestamp_ms: Date.parse("2026-10-26T20:01:00Z"),
+		timestamp_ms: Date.parse("2026-10-26T20:15:00Z"),
 		sequence: 2,
 		price: 21000,
 		volume: 1,

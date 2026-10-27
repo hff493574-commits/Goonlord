@@ -31,7 +31,7 @@
 		parts.forEach(function (part) { values[part.type] = part.value; });
 		var weekday = values.weekday;
 		var minutes = Number(values.hour) * 60 + Number(values.minute);
-		return weekday !== "Sat" && weekday !== "Sun" && minutes >= 9 * 60 + 30 && minutes < 16 * 60;
+		return weekday !== "Sat" && weekday !== "Sun" && minutes >= 9 * 60 + 30 && minutes < 16 * 60 + 15;
 	}
 
 	function localSessionStart(timestamp) {
@@ -62,7 +62,7 @@
 		if (isRegularHours(timestamp)) { return 0; }
 		var day = timestamp;
 		for (var offset = 0; offset < 8; offset += 1) {
-			var close = localSessionStart(day) + (6 * 60 * 60 + 30 * 60) * 1000;
+			var close = localSessionStart(day) + (6 * 60 * 60 + 45 * 60) * 1000;
 			if (close <= timestamp && isRegularHours(close - 1000)) {
 				return timestamp - close;
 			}
@@ -78,6 +78,10 @@
 
 	function isIntradayResolution(resolution) {
 		return /^(\d+)S$/.test(resolution) || /^\d+$/.test(resolution);
+	}
+
+	function isMinuteResolution(resolution) {
+		return /^\d+$/.test(resolution);
 	}
 
 	function resolutionDurationMs(resolution) {
@@ -138,12 +142,23 @@
 		var requestedCountBack = Math.max(1, Number(period.countBack) || 1000);
 		var queryCountBack = requestedCountBack;
 		var from = period.from;
+		var duration = resolutionDurationMs(resolution);
+		var recentHistoryWindowMs = 3 * 24 * 60 * 60 * 1000;
+		var recentRequest = period.to * 1000 >= Date.now() - recentHistoryWindowMs;
+		if (isMinuteResolution(resolution) && recentRequest) {
+			var minimumHistoryCount = Math.ceil(recentHistoryWindowMs / duration);
+			queryCountBack = Math.max(queryCountBack, minimumHistoryCount);
+			from = Math.min(from, Math.floor((period.to * 1000 - queryCountBack * duration) / 1000));
+		}
 		if (sessionMode === "RTH" && isIntradayResolution(resolution)) {
-			var duration = resolutionDurationMs(resolution);
 			queryCountBack = Math.min(5000, Math.ceil(
 				requestedCountBack * 4 +
 				(regularHoursLookbackMs(period.to * 1000) + 24 * 60 * 60 * 1000) / duration,
 			));
+			if (isMinuteResolution(resolution) && recentRequest) {
+				queryCountBack = Math.max(queryCountBack, Math.ceil(recentHistoryWindowMs / duration));
+			}
+			queryCountBack = Math.min(queryCountBack, 5000);
 			from = Math.min(from, Math.floor((period.to * 1000 - queryCountBack * duration) / 1000));
 		}
 		var query = new URLSearchParams({
@@ -174,6 +189,9 @@
 				if (sessionMode === "RTH" && isIntradayResolution(resolution)) {
 					bars = bars.filter(function (bar) { return isRegularHours(bar.time); });
 				}
+				bars = bars.filter(function (bar) {
+					return bar.time >= from * 1000 && bar.time <= period.to * 1000;
+				});
 				if (bars.length) {
 					var latestBar = bars[bars.length - 1];
 					this.setLatestPrice(symbolInfo.ticker, latestBar.close, latestBar.time);
@@ -255,7 +273,7 @@
 			resolveSymbol: function (symbolName, onResolve, onError) {
 				datafeed.resolveSymbol(symbolName, function (symbolInfo) {
 					if (sessionMode === "RTH") {
-						symbolInfo.session = "0930-1600:23456";
+						symbolInfo.session = "0930-1615:23456";
 						symbolInfo.timezone = "America/New_York";
 					}
 					onResolve(symbolInfo);
