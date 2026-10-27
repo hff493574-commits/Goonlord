@@ -52,9 +52,8 @@
 				var commandInput = document.getElementById('command-palette-input');
 				var commandResults = document.getElementById('command-palette-results');
 				var activeChartSelect = document.getElementById('active-chart-select');
-				var watchlistToggleStorageKey = 'lse-watchlist-hidden-v1';
-				var watchlistPositionStorageKey = 'lse-watchlist-window-position-v1';
 				var watchlistPanel = document.querySelector('.watchlist-panel');
+				var watchlistToggle = document.getElementById('watchlist-toggle');
 				var chartWidgets = [];
 				var calendarAppWindow = null;
 				var readyChartIndexes = new Set();
@@ -95,6 +94,10 @@
 								minimized: Array.isArray(canvas.minimized) ? canvas.minimized : [],
 								toolbar: Number.isInteger(canvas.toolbar) ? canvas.toolbar : -1,
 								calendarOpen: Boolean(canvas.calendarOpen),
+								watchlistOpen: Boolean(canvas.watchlistOpen),
+								watchlistRect: canvas.watchlistRect && typeof canvas.watchlistRect === 'object' ?
+									canvas.watchlistRect : null,
+								watchlistMinimized: Boolean(canvas.watchlistMinimized),
 							};
 						});
 						activeCanvasId = workspaceCanvases.some(function (canvas) {
@@ -124,6 +127,9 @@
 							minimized: minimizedChartIndexes,
 							toolbar: visibleChartIndexes.length ? visibleChartIndexes[0] : -1,
 							calendarOpen: false,
+							watchlistOpen: false,
+							watchlistRect: null,
+							watchlistMinimized: false,
 						}];
 					}
 				} catch (error) {
@@ -134,6 +140,7 @@
 						id: activeCanvasId, name: 'Canvas 1', open: visibleChartIndexes,
 						rects: chartWindowRects, minimized: minimizedChartIndexes,
 						toolbar: visibleChartIndexes.length ? visibleChartIndexes[0] : -1, calendarOpen: false,
+						watchlistOpen: false, watchlistRect: null, watchlistMinimized: false,
 					}];
 				}
 				var initialCanvas = workspaceCanvases.find(function (canvas) { return canvas.id === activeCanvasId; });
@@ -143,7 +150,6 @@
 				if (!hasSavedDesktop && !visibleChartIndexes.includes(0)) { visibleChartIndexes.unshift(0); }
 				var toolbarChartIndex = initialCanvas.toolbar >= 0 ? initialCanvas.toolbar :
 					(visibleChartIndexes.length ? visibleChartIndexes[0] : -1);
-				chartGrid.dataset.canvasId = activeCanvasId;
 				var defaultChartSymbols = ['NQ.F', 'ES.F', 'GC.F', 'FDAX.F'];
 				document.documentElement.dataset.theme = initialTheme;
 
@@ -365,12 +371,21 @@
 					});
 					canvas.toolbar = toolbarChartIndex;
 					canvas.calendarOpen = Boolean(chartGrid.querySelector('.calendar-app-window'));
+					canvas.watchlistOpen = !watchlistPanel.hidden;
+					if (canvas.watchlistOpen && !watchlistPanel.classList.contains('is-minimized') &&
+						!watchlistPanel.classList.contains('is-maximized')) {
+						canvas.watchlistRect = readWatchlistWindowRect();
+					}
+					canvas.watchlistMinimized = canvas.watchlistOpen &&
+						watchlistPanel.classList.contains('is-minimized');
 				}
 
 				function switchCanvas(canvasId) {
 					if (canvasId === activeCanvasId) { return; }
 					saveCurrentCanvasState();
 					chartGrid.hidden = true;
+					watchlistPanel.hidden = true;
+					watchlistPanel.remove();
 					var canvas = workspaceCanvases.find(function (item) { return item.id === canvasId; });
 					if (!canvas) { return; }
 					activeCanvasId = canvas.id;
@@ -381,6 +396,7 @@
 						(visibleChartIndexes.length ? visibleChartIndexes[0] : -1);
 					chartGrid = canvasGrid(canvas);
 					chartGrid.hidden = false;
+					restoreWatchlistCanvasState(canvas);
 					calendarAppWindow = chartGrid.querySelector('.calendar-app-window');
 					visibleChartIndexes.forEach(function (index) { ensureChartWidget(index); });
 					activeWidgetIndex = -1;
@@ -397,6 +413,7 @@
 						id: 'canvas-' + nextCanvasId,
 						name: 'Canvas ' + (workspaceCanvases.length + 1),
 						open: [], rects: {}, minimized: [], toolbar: -1, calendarOpen: false,
+						watchlistOpen: false, watchlistRect: null, watchlistMinimized: false,
 					};
 					nextCanvasId += 1;
 					workspaceCanvases.push(canvas);
@@ -789,14 +806,55 @@
 
 				function applyChartWindowRect(cell, rect) {
 					var gridBounds = chartGrid.getBoundingClientRect();
-					var width = Math.max(220, Number(rect.width) || gridBounds.width * 0.7);
-					var height = Math.max(160, Number(rect.height) || gridBounds.height * 0.8);
-					var x = Math.max(0, Math.min(Number(rect.x) || 0, Math.max(0, gridBounds.width - 96)));
-					var y = Math.max(0, Math.min(Number(rect.y) || 0, Math.max(0, gridBounds.height - 31)));
+					var width = Math.min(gridBounds.width, Math.max(Math.min(220, gridBounds.width),
+						Number(rect.width) || gridBounds.width * 0.7));
+					var height = Math.min(gridBounds.height, Math.max(Math.min(160, gridBounds.height),
+						Number(rect.height) || gridBounds.height * 0.8));
+					var x = Math.max(0, Math.min(Number(rect.x) || 0, gridBounds.width - width));
+					var y = Math.max(0, Math.min(Number(rect.y) || 0, gridBounds.height - height));
 					cell.style.left = x + 'px';
 					cell.style.top = y + 'px';
 					cell.style.width = width + 'px';
 					cell.style.height = height + 'px';
+				}
+
+				function defaultWatchlistRect() {
+					var bounds = chartGrid.getBoundingClientRect();
+					var width = Math.min(300, Math.max(220, bounds.width * 0.38));
+					var height = Math.min(620, Math.max(220, bounds.height * 0.78));
+					width = Math.min(width, bounds.width);
+					height = Math.min(height, bounds.height);
+					return {
+						x: Math.max(0, bounds.width - width - 16),
+						y: Math.min(16, Math.max(0, bounds.height - height)),
+						width: width,
+						height: height,
+					};
+				}
+
+				function readWatchlistWindowRect() {
+					var gridBounds = chartGrid.getBoundingClientRect();
+					var bounds = watchlistPanel.getBoundingClientRect();
+					return {
+						x: bounds.left - gridBounds.left,
+						y: bounds.top - gridBounds.top,
+						width: bounds.width,
+						height: bounds.height,
+					};
+				}
+
+				function applyWatchlistWindowRect(rect) {
+					var bounds = chartGrid.getBoundingClientRect();
+					var minWidth = Math.min(220, bounds.width);
+					var minHeight = Math.min(190, bounds.height);
+					var width = Math.min(bounds.width, Math.max(minWidth, Number(rect.width) || bounds.width * 0.38));
+					var height = Math.min(bounds.height, Math.max(minHeight, Number(rect.height) || bounds.height * 0.78));
+					var x = Math.max(0, Math.min(Number(rect.x) || 0, bounds.width - width));
+					var y = Math.max(0, Math.min(Number(rect.y) || 0, bounds.height - height));
+					watchlistPanel.style.left = x + 'px';
+					watchlistPanel.style.top = y + 'px';
+					watchlistPanel.style.width = width + 'px';
+					watchlistPanel.style.height = height + 'px';
 				}
 
 				function toggleChartMinimized(index, cell, button) {
@@ -1375,8 +1433,8 @@
 					{ command: '/canvas', title: 'New canvas', detail: 'Create and switch to a new workspace canvas', run: addCanvas },
 					{ command: '/chart', title: 'New chart', detail: 'Open a chart window', run: addChartWindow },
 					{ command: '/charts', title: 'Restore minimized charts', detail: 'Bring minimized charts back to the canvas', run: restoreMinimizedCharts },
-					{ command: '/watchlist', title: 'Open watchlist', detail: 'Show the watchlist as a floating window', run: function () { setWatchlistHidden(false, true); } },
-					{ command: '/watchlist hide', title: 'Hide watchlist', detail: 'Close the floating watchlist', run: function () { setWatchlistHidden(true, true); } },
+					{ command: '/watchlist', title: 'Open watchlist', detail: 'Open the watchlist app in this canvas', run: function () { setWatchlistOpen(true); } },
+					{ command: '/watchlist hide', title: 'Hide watchlist', detail: 'Close the watchlist app in this canvas', run: function () { setWatchlistOpen(false); } },
 					{ command: '/news', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
 					{ command: '/calendar', title: 'Economic calendar', detail: 'Open the market events calendar', run: openEconomicCalendarWindow },
 				];
@@ -1450,8 +1508,8 @@
 					if (event.target === commandPalette) { closeCommandPalette(); }
 				});
 				document.getElementById('command-palette-toggle').addEventListener('click', openCommandPalette);
-				document.getElementById('watchlist-close').addEventListener('click', function () {
-					setWatchlistHidden(true, true);
+				document.getElementById('watchlist-window-close').addEventListener('click', function () {
+					setWatchlistOpen(false);
 				});
 
 				function searchSymbols(query) {
@@ -1591,8 +1649,19 @@
 				addCanvasButton.addEventListener('click', addCanvas);
 				renderCanvasTabs();
 				workspaceCanvases.forEach(function (canvas) { canvasGrid(canvas); });
+				chartGrid = canvasGrid(initialCanvas);
 				chartGrid.hidden = false;
+				restoreWatchlistCanvasState(initialCanvas);
 				addChartButton.addEventListener('click', addChartWindow);
+				watchlistToggle.addEventListener('click', function () {
+					setWatchlistOpen(watchlistPanel.hidden || watchlistPanel.classList.contains('is-minimized'));
+				});
+				document.getElementById('watchlist-window-minimize').addEventListener('click', function () {
+					setWatchlistMinimized(!watchlistPanel.classList.contains('is-minimized'));
+				});
+				document.getElementById('watchlist-window-maximize').addEventListener('click', function () {
+					setWatchlistMaximized(!watchlistPanel.classList.contains('is-maximized'));
+				});
 				activeChartSelect.addEventListener('change', function () {
 					setActiveChartWidget(Number(activeChartSelect.value));
 				});
@@ -1611,83 +1680,207 @@
 						clearDrawingMirrors();
 					}
 				});
-				function setWatchlistHidden(hidden, persist) {
-					var terminalGrid = document.querySelector('.terminal-grid');
-					terminalGrid.classList.add('is-watchlist-hidden');
-					watchlistPanel.classList.toggle('is-floating', !hidden);
-					watchlistPanel.hidden = hidden;
-					if (!hidden) {
-						try {
-							var savedPosition = JSON.parse(localStorage.getItem(watchlistPositionStorageKey) || 'null');
-							if (savedPosition && Number.isFinite(savedPosition.left) && Number.isFinite(savedPosition.top)) {
-								watchlistPanel.style.left = Math.max(0, Math.min(
-									window.innerWidth - watchlistPanel.offsetWidth, savedPosition.left
-								)) + 'px';
-								watchlistPanel.style.top = Math.max(0, Math.min(
-									window.innerHeight - 48, savedPosition.top
-								)) + 'px';
-								watchlistPanel.style.right = 'auto';
-							}
-						} catch (error) {
-							console.error('Unable to restore watchlist position:', error);
-						}
-					}
-					watchlistPanel.setAttribute('aria-hidden', String(hidden));
-					watchlistPanel.inert = hidden;
-					if (persist) {
-						try {
-							localStorage.setItem(watchlistToggleStorageKey, String(hidden));
-						} catch (error) {
-							console.error('Unable to save watchlist visibility:', error);
-						}
-					}
+				function updateWatchlistWindowButtons() {
+					var minimized = watchlistPanel.classList.contains('is-minimized');
+					var maximize = watchlistPanel.classList.contains('is-maximized');
+					var minimizeButton = document.getElementById('watchlist-window-minimize');
+					var maximizeButton = document.getElementById('watchlist-window-maximize');
+					minimizeButton.setAttribute('aria-label', minimized ? 'Restore watchlist' : 'Minimize watchlist');
+					minimizeButton.title = minimized ? 'Restore watchlist' : 'Minimize watchlist';
+					minimizeButton.innerHTML = minimized
+						? '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M8 3v10"/></svg>'
+						: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.5h10"/></svg>';
+					maximizeButton.setAttribute('aria-label', maximize ? 'Restore watchlist size' : 'Maximize watchlist');
+					maximizeButton.title = maximize ? 'Restore watchlist size' : 'Maximize watchlist';
+					maximizeButton.innerHTML = maximize
+						? '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3.5v7.5h7.5M11 12.5V5H3.5"/></svg>'
+						: '<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.25" y="3.25" width="9.5" height="9.5" rx="1"/></svg>';
 				}
+
+				function restoreWatchlistCanvasState(canvas) {
+					watchlistPanel.classList.add('is-app-window');
+					watchlistPanel.classList.remove('is-maximized', 'is-minimized');
+					if (!canvas.watchlistOpen) {
+						watchlistPanel.remove();
+						watchlistPanel.hidden = true;
+						watchlistPanel.inert = true;
+						watchlistToggle.setAttribute('aria-pressed', 'false');
+						return;
+					}
+					chartGrid.append(watchlistPanel);
+					watchlistPanel.hidden = false;
+					watchlistPanel.inert = false;
+					applyWatchlistWindowRect(canvas.watchlistRect || defaultWatchlistRect());
+					if (canvas.watchlistMinimized) { watchlistPanel.classList.add('is-minimized'); }
+					watchlistPanel.style.zIndex = String(nextCanvasZIndex());
+					watchlistToggle.setAttribute('aria-pressed', 'true');
+					updateWatchlistWindowButtons();
+				}
+
+				function setWatchlistOpen(open) {
+					var canvas = activeCanvas();
+					if (!canvas) { return; }
+					canvas.watchlistOpen = open;
+					if (open) {
+						if (watchlistPanel.parentElement !== chartGrid) { chartGrid.append(watchlistPanel); }
+						watchlistPanel.hidden = false;
+						watchlistPanel.inert = false;
+						watchlistPanel.classList.remove('is-minimized', 'is-maximized');
+						applyWatchlistWindowRect(canvas.watchlistRect || defaultWatchlistRect());
+						watchlistPanel.style.zIndex = String(nextCanvasZIndex());
+						watchlistToggle.setAttribute('aria-pressed', 'true');
+						updateWatchlistWindowButtons();
+					} else {
+						canvas.watchlistMinimized = false;
+						watchlistPanel.hidden = true;
+						watchlistPanel.inert = true;
+						watchlistPanel.remove();
+						watchlistToggle.setAttribute('aria-pressed', 'false');
+					}
+					saveChartDesktop();
+				}
+
+				function setWatchlistMinimized(minimized) {
+					if (watchlistPanel.hidden) { return; }
+					var canvas = activeCanvas();
+					if (minimized) { canvas.watchlistRect = readWatchlistWindowRect(); }
+					watchlistPanel.classList.toggle('is-minimized', minimized);
+					canvas.watchlistMinimized = minimized;
+					if (!minimized) {
+						applyWatchlistWindowRect(canvas.watchlistRect || defaultWatchlistRect());
+						watchlistPanel.style.zIndex = String(nextCanvasZIndex());
+					}
+					updateWatchlistWindowButtons();
+					saveChartDesktop();
+				}
+
+				function setWatchlistMaximized(maximized) {
+					if (watchlistPanel.hidden || watchlistPanel.classList.contains('is-minimized')) { return; }
+					var canvas = activeCanvas();
+					if (maximized) { canvas.watchlistRect = readWatchlistWindowRect(); }
+					watchlistPanel.classList.toggle('is-maximized', maximized);
+					if (!maximized) {
+						applyWatchlistWindowRect(canvas.watchlistRect || defaultWatchlistRect());
+					}
+					watchlistPanel.style.zIndex = String(nextCanvasZIndex());
+					updateWatchlistWindowButtons();
+					saveChartDesktop();
+				}
+
 				var watchlistTitlebar = watchlistPanel.querySelector('.watchlist-tools');
 				watchlistTitlebar.addEventListener('pointerdown', function (event) {
-					if (!watchlistPanel.classList.contains('is-floating') || event.button !== 0 ||
-						event.target.closest('button')) { return; }
+					if (event.button !== 0 || event.target.closest('button') ||
+						watchlistPanel.classList.contains('is-maximized') ||
+						watchlistPanel.classList.contains('is-minimized')) { return; }
 					event.preventDefault();
 					watchlistTitlebar.setPointerCapture(event.pointerId);
 					var startX = event.clientX;
 					var startY = event.clientY;
-					var startLeft = watchlistPanel.getBoundingClientRect().left;
-					var startTop = watchlistPanel.getBoundingClientRect().top;
+					var startRect = readWatchlistWindowRect();
+					var moveFinished = false;
 					function moveWatchlist(moveEvent) {
 						if (moveEvent.pointerId !== event.pointerId) { return; }
-						watchlistPanel.style.left = Math.max(0, Math.min(
-							window.innerWidth - watchlistPanel.offsetWidth,
-							startLeft + moveEvent.clientX - startX
-						)) + 'px';
-						watchlistPanel.style.top = Math.max(0, Math.min(
-							window.innerHeight - 48,
-							startTop + moveEvent.clientY - startY
-						)) + 'px';
+						if ((moveEvent.buttons & 1) === 0) { finishWatchlistMove(); return; }
+						applyWatchlistWindowRect(Object.assign({}, startRect, {
+							x: startRect.x + moveEvent.clientX - startX,
+							y: startRect.y + moveEvent.clientY - startY,
+						}));
 					}
 					function finishWatchlistMove() {
+						if (moveFinished) { return; }
+						moveFinished = true;
 						window.removeEventListener('pointermove', moveWatchlist);
 						window.removeEventListener('pointerup', finishWatchlistMove);
 						window.removeEventListener('pointercancel', finishWatchlistMove);
 						if (watchlistTitlebar.hasPointerCapture(event.pointerId)) {
 							watchlistTitlebar.releasePointerCapture(event.pointerId);
 						}
-						try {
-							localStorage.setItem(watchlistPositionStorageKey, JSON.stringify({
-								left: watchlistPanel.offsetLeft,
-								top: watchlistPanel.offsetTop,
-							}));
-						} catch (error) {
-							console.error('Unable to save watchlist position:', error);
-						}
+						var canvas = activeCanvas();
+						if (canvas) { canvas.watchlistRect = readWatchlistWindowRect(); }
+						saveChartDesktop();
 					}
 					window.addEventListener('pointermove', moveWatchlist);
 					window.addEventListener('pointerup', finishWatchlistMove);
 					window.addEventListener('pointercancel', finishWatchlistMove);
 				});
-				setWatchlistHidden(true, false);
+				watchlistPanel.addEventListener('pointerdown', function () {
+					if (!watchlistPanel.hidden) {
+						watchlistPanel.style.zIndex = String(nextCanvasZIndex());
+					}
+				});
+				watchlistPanel.querySelectorAll('.watchlist-window-resize').forEach(function (handle) {
+					handle.addEventListener('pointerdown', function (event) {
+						if (event.button !== 0 || watchlistPanel.classList.contains('is-maximized') ||
+							watchlistPanel.classList.contains('is-minimized')) { return; }
+						event.preventDefault();
+						event.stopPropagation();
+						watchlistPanel.style.zIndex = String(nextCanvasZIndex());
+						handle.setPointerCapture(event.pointerId);
+						var startX = event.clientX;
+						var startY = event.clientY;
+						var startRect = readWatchlistWindowRect();
+						var direction = handle.dataset.direction;
+						var resizeFinished = false;
+						function resizeWatchlist(moveEvent) {
+							if (moveEvent.pointerId !== event.pointerId) { return; }
+							if ((moveEvent.buttons & 1) === 0) { finishWatchlistResize(); return; }
+							var bounds = chartGrid.getBoundingClientRect();
+							var dx = moveEvent.clientX - startX;
+							var dy = moveEvent.clientY - startY;
+							var minWidth = Math.min(220, bounds.width);
+							var minHeight = Math.min(190, bounds.height);
+							var next = Object.assign({}, startRect);
+							if (direction.includes('e')) {
+								next.width = Math.max(minWidth, Math.min(startRect.width + dx, bounds.width - startRect.x));
+							}
+							if (direction.includes('s')) {
+								next.height = Math.max(minHeight, Math.min(startRect.height + dy, bounds.height - startRect.y));
+							}
+							if (direction.includes('w')) {
+								next.x = Math.max(0, Math.min(startRect.x + dx, startRect.x + startRect.width - minWidth));
+								next.width = startRect.width + startRect.x - next.x;
+							}
+							if (direction.includes('n')) {
+								next.y = Math.max(0, Math.min(startRect.y + dy, startRect.y + startRect.height - minHeight));
+								next.height = startRect.height + startRect.y - next.y;
+							}
+							applyWatchlistWindowRect(next);
+						}
+						function finishWatchlistResize() {
+							if (resizeFinished) { return; }
+							resizeFinished = true;
+							window.removeEventListener('pointermove', resizeWatchlist);
+							window.removeEventListener('pointerup', finishWatchlistResize);
+							window.removeEventListener('pointercancel', finishWatchlistResize);
+							if (handle.hasPointerCapture(event.pointerId)) { handle.releasePointerCapture(event.pointerId); }
+							var canvas = activeCanvas();
+							if (canvas) { canvas.watchlistRect = readWatchlistWindowRect(); }
+							saveChartDesktop();
+						}
+						window.addEventListener('pointermove', resizeWatchlist);
+						window.addEventListener('pointerup', finishWatchlistResize);
+						window.addEventListener('pointercancel', finishWatchlistResize);
+					});
+				});
 
 				renderWatchlist();
 				visibleChartIndexes.forEach(function (index) {
 					ensureChartWidget(index);
+				});
+				window.addEventListener('resize', function () {
+					visibleChartIndexes.forEach(function (index) {
+						var cell = document.getElementById('chart-cell-' + index);
+						if (cell && !cell.classList.contains('is-maximized')) {
+							applyChartWindowRect(cell, chartWindowRects[index] || readChartWindowRect(cell));
+							chartWindowRects[index] = readChartWindowRect(cell);
+						}
+					});
+					var canvas = activeCanvas();
+					if (canvas && !watchlistPanel.hidden && !watchlistPanel.classList.contains('is-maximized')) {
+						applyWatchlistWindowRect(canvas.watchlistRect || readWatchlistWindowRect());
+						canvas.watchlistRect = readWatchlistWindowRect();
+					}
+					saveChartDesktop();
 				});
 				if (initialCanvas.calendarOpen) { openEconomicCalendarWindow(); }
 				if (visibleChartIndexes.length) { setChartWindowActive(visibleChartIndexes[0]); }
@@ -1706,6 +1899,7 @@
 				<main class="chart-workspace">
 					<div class="chart-layout-bar" aria-label="Chart layout controls">
 						<button id="add-chart-window" class="workspace-action-button" type="button" aria-label="Add chart" title="Add chart"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span>CHART</span></button>
+						<button id="watchlist-toggle" class="workspace-action-button" type="button" aria-label="Open watchlist" title="Open watchlist app" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 7.5h10M3 11.5h6"/><circle cx="11.5" cy="11.5" r="1.5"/></svg><span>WATCHLIST</span></button>
 						<button id="command-palette-toggle" class="workspace-action-button command-open-button" type="button" aria-label="Open command palette" title="Command palette (/)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4-3 4 3 4m4-8 3 4-3 4"/></svg><span>COMMAND</span><kbd>/</kbd></button>
 						<div id="canvas-tabs" class="canvas-tabs" aria-label="Workspace canvases">
 							<button id="add-canvas" class="workspace-action-button add-canvas-button" type="button" title="Add canvas" aria-label="Add canvas"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
@@ -1721,10 +1915,15 @@
 					</div>
 					<div class="chart-frame"><div id="chart-grid"></div></div>
 				</main>
-				<aside id="watchlist-panel" class="watchlist-panel" aria-label="Watchlist">
+				<aside id="watchlist-panel" class="watchlist-panel" aria-label="Watchlist" hidden>
 					<div class="watchlist-tools">
 						<strong class="watchlist-window-label">WATCHLIST</strong>
 						<span class="watchlist-live-label"><i></i> LIVE</span>
+						<div class="watchlist-window-actions">
+							<button id="watchlist-window-minimize" class="chart-window-button" type="button" aria-label="Minimize watchlist" title="Minimize watchlist"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 11.5h10"/></svg></button>
+							<button id="watchlist-window-maximize" class="chart-window-button" type="button" aria-label="Maximize watchlist" title="Maximize watchlist"><svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3.25" y="3.25" width="9.5" height="9.5" rx="1"/></svg></button>
+							<button id="watchlist-window-close" class="chart-window-button chart-window-close" type="button" aria-label="Close watchlist" title="Close watchlist"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg></button>
+						</div>
 					</div>
 					<div class="panel-heading">
 						<div><span class="section-index">01</span><h2>Watchlist</h2></div>
@@ -1732,7 +1931,6 @@
 							<span id="watch-count" class="watch-count">03</span>
 							<button id="tick-tape-toggle" class="tick-tape-toggle" type="button" title="Open live tick tape for current chart symbol" aria-label="Open live tick tape for current chart symbol" aria-expanded="false" aria-controls="tick-tape"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 11.5h2l2-7 3 9 2-5h2"/></svg></button>
 							<button id="watch-search-toggle" class="watch-add-toggle" type="button" title="Add symbol" aria-label="Add symbol" aria-expanded="false" aria-controls="watch-search-wrap"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg></button>
-							<button id="watchlist-close" class="watch-add-toggle" type="button" title="Hide watchlist" aria-label="Hide watchlist"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8"/></svg></button>
 						</div>
 					</div>
 					<section id="tick-tape" class="tick-tape" aria-label="Live tick tape" hidden>
@@ -1750,6 +1948,14 @@
 					</div>
 					<div id="watch-items" class="watch-items"></div>
 					<div class="watchlist-foot"><span class="feed-mark"></span><span id="ui-status">HISTORY + LIVE TICKS</span></div>
+					<div class="chart-window-resize resize-n watchlist-window-resize" data-direction="n" aria-hidden="true"></div>
+					<div class="chart-window-resize resize-e watchlist-window-resize" data-direction="e" aria-hidden="true"></div>
+					<div class="chart-window-resize resize-s watchlist-window-resize" data-direction="s" aria-hidden="true"></div>
+					<div class="chart-window-resize resize-w watchlist-window-resize" data-direction="w" aria-hidden="true"></div>
+					<div class="chart-window-resize resize-ne watchlist-window-resize" data-direction="ne" aria-hidden="true"></div>
+					<div class="chart-window-resize resize-se watchlist-window-resize" data-direction="se" aria-hidden="true"></div>
+					<div class="chart-window-resize resize-sw watchlist-window-resize" data-direction="sw" aria-hidden="true"></div>
+					<div class="chart-window-resize resize-nw watchlist-window-resize" data-direction="nw" aria-hidden="true"></div>
 				</aside>
 			</div>
 		</div>
