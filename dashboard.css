@@ -826,6 +826,14 @@ a { font: inherit; }
 
 .chart-window-button:hover { background: #273235; color: #fff; }
 .chart-window-close:hover { background: #a33932; }
+.chart-rth-toggle {
+	width: auto;
+	min-width: 42px;
+	padding: 0 8px;
+	font: 8px var(--mono);
+	letter-spacing: .06em;
+}
+.chart-rth-toggle[aria-pressed="true"] { color: var(--green); }
 
 .chart-window-content {
 	position: absolute;

@@ -145,21 +145,25 @@
 		var duration = resolutionDurationMs(resolution);
 		var recentHistoryWindowMs = 3 * 24 * 60 * 60 * 1000;
 		var recentRequest = period.to * 1000 >= Date.now() - recentHistoryWindowMs;
+		var requestedWindowCount = Math.ceil((period.to - period.from) * 1000 / duration);
 		if (isMinuteResolution(resolution) && recentRequest) {
 			var minimumHistoryCount = Math.ceil(recentHistoryWindowMs / duration);
 			queryCountBack = Math.max(queryCountBack, minimumHistoryCount);
 			from = Math.min(from, Math.floor((period.to * 1000 - queryCountBack * duration) / 1000));
 		}
 		if (sessionMode === "RTH" && isIntradayResolution(resolution)) {
-			queryCountBack = Math.min(5000, Math.ceil(
+			queryCountBack = Math.ceil(
 				requestedCountBack * 4 +
 				(regularHoursLookbackMs(period.to * 1000) + 24 * 60 * 60 * 1000) / duration,
-			));
+			);
+			queryCountBack = Math.max(queryCountBack, requestedWindowCount);
 			if (isMinuteResolution(resolution) && recentRequest) {
 				queryCountBack = Math.max(queryCountBack, Math.ceil(recentHistoryWindowMs / duration));
 			}
 			queryCountBack = Math.min(queryCountBack, 5000);
-			from = Math.min(from, Math.floor((period.to * 1000 - queryCountBack * duration) / 1000));
+			if (recentRequest) {
+				from = Math.min(from, Math.floor((period.to * 1000 - queryCountBack * duration) / 1000));
+			}
 		}
 		var query = new URLSearchParams({
 			symbol: symbolInfo.ticker,

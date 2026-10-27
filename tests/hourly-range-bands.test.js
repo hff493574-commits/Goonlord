@@ -312,4 +312,6 @@ test("registers the updated study and replaces the previous saved study name", (
 	assert.equal(indicator.name, "RTH Hourly, 4-Hour & Daily Range Bands");
 	assert.match(chartPage, /RTH Hourly, 4-Hour & Daily Range Bands/);
 	assert.match(chartPage, /NY 18:00 Hourly & 4-Hour Range Bands/);
+	assert.match(chartPage, /chart-window-button chart-rth-toggle/);
+	assert.doesNotMatch(chartPage, /id="rth-toggle"/);
 });

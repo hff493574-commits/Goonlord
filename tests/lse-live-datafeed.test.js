@@ -195,6 +195,30 @@ test("RTH history requests enough bars to reach the previous regular session", a
 	assert.ok(Number(historyRequests.at(-1).searchParams.get("from")) < beforeOpen / 1000 - 3600);
 });
 
+test("older RTH history requests honor the chart's requested range when paging", async () => {
+	const datafeed = new browser.LSELiveDatafeed("https://example.test");
+	const client = datafeed.createClient(42);
+	client.setRegularHoursEnabled(true);
+	historyPayload = { s: "no_data" };
+	const end = Date.parse("2026-10-15T15:00:00Z") / 1000;
+	const start = end - 2 * 24 * 60 * 60;
+
+	await new Promise((resolve, reject) => {
+		client.getBars(
+			{ ticker: "NQ.F" },
+			"1",
+			{ from: start, to: end, countBack: 300 },
+			resolve,
+			reject,
+		);
+	});
+
+	const request = historyRequests.at(-1);
+	assert.equal(Number(request.searchParams.get("from")), start);
+	assert.equal(Number(request.searchParams.get("to")), end);
+	assert.equal(request.searchParams.get("countback"), "2880");
+});
+
 test("RTH live candles include the 16:14 minute and align to 09:30 across DST", () => {
 	const datafeed = new browser.LSELiveDatafeed("https://example.test");
 	const daylightState = {

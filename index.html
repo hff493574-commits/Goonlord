@@ -48,7 +48,6 @@
 				var canvasTabs = document.getElementById('canvas-tabs');
 				var addCanvasButton = document.getElementById('add-canvas');
 				var addChartButton = document.getElementById('add-chart-window');
-				var rthToggleButton = document.getElementById('rth-toggle');
 				var commandPalette = document.getElementById('command-palette');
 				var commandInput = document.getElementById('command-palette-input');
 				var commandResults = document.getElementById('command-palette-results');
@@ -479,7 +478,6 @@
 						activeWidgetIndex = -1;
 						widget = null;
 						window.tvWidget = null;
-						updateRthToggle();
 						updateChartSelectors();
 						return;
 					}
@@ -495,29 +493,31 @@
 						activeSymbol = defaultChartSymbols[index];
 						updateSymbol(activeSymbol);
 					}
-					updateRthToggle();
 				}
 
-				function updateRthToggle() {
-					var enabled = activeWidgetIndex >= 0 && chartDatafeedClients[activeWidgetIndex] &&
-						chartDatafeedClients[activeWidgetIndex].isRegularHoursEnabled();
-					rthToggleButton.setAttribute('aria-pressed', String(Boolean(enabled)));
-					rthToggleButton.setAttribute('aria-label', enabled ? 'Use extended trading hours' : 'Use regular trading hours');
-					rthToggleButton.title = enabled
-						? 'RTH enabled · click to show ETH (09:30–16:14 New York)'
-						: 'RTH off · click to show RTH (09:30–16:14 New York)';
+				function updateChartRthToggle(index) {
+					var button = document.querySelector('#chart-cell-' + index + ' .chart-rth-toggle');
+					var client = chartDatafeedClients[index];
+					var enabled = Boolean(client && client.isRegularHoursEnabled());
+					if (!button) { return; }
+					button.setAttribute('aria-pressed', String(enabled));
+					button.setAttribute('aria-label', enabled ? 'Use extended hours for chart ' + (index + 1) :
+						'Use regular trading hours for chart ' + (index + 1));
+					button.title = enabled
+						? 'RTH on · click to show ETH (chart ' + (index + 1) + ')'
+						: 'RTH off · click to show RTH, 09:30–16:14 New York (chart ' + (index + 1) + ')';
 				}
 
-				function toggleActiveChartRth() {
-					var datafeedClient = chartDatafeedClients[activeWidgetIndex];
-					var activeChart = widget && widget.activeChart();
-					if (!datafeedClient || !activeChart) {
-						document.getElementById('chart-layout-status').textContent = 'OPEN A CHART TO CHANGE SESSION';
+				function toggleChartRth(index) {
+					var datafeedClient = chartDatafeedClients[index];
+					var chartWidget = chartWidgets[index];
+					if (!datafeedClient || !chartWidget) {
+						document.getElementById('chart-layout-status').textContent = 'CHART IS STILL LOADING';
 						return;
 					}
 					datafeedClient.setRegularHoursEnabled(!datafeedClient.isRegularHoursEnabled());
-					updateRthToggle();
-					activeChart.resetData();
+					updateChartRthToggle(index);
+					chartWidget.activeChart().resetData();
 					saveChartDesktop();
 				}
 
@@ -714,6 +714,15 @@
 					titlebar.innerHTML = '<div class="chart-window-drag-handle" title="Hold and drag to move"><svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="5" cy="4" r=".7"/><circle cx="11" cy="4" r=".7"/><circle cx="5" cy="8" r=".7"/><circle cx="11" cy="8" r=".7"/><circle cx="5" cy="12" r=".7"/><circle cx="11" cy="12" r=".7"/></svg></div><strong></strong><div class="chart-window-actions"></div>';
 					titlebar.querySelector('strong').textContent = 'CHART ' + (index + 1);
 					var actions = titlebar.querySelector('.chart-window-actions');
+					var rthButton = document.createElement('button');
+					rthButton.type = 'button';
+					rthButton.className = 'chart-window-button chart-rth-toggle';
+					rthButton.textContent = 'RTH';
+					rthButton.addEventListener('click', function (event) {
+						event.stopPropagation();
+						toggleChartRth(index);
+					});
+					updateChartRthToggle(index);
 					var minimizeButton = document.createElement('button');
 					minimizeButton.type = 'button';
 					minimizeButton.className = 'chart-window-button';
@@ -755,7 +764,7 @@
 						minimizeButton.title = 'Restore chart';
 						minimizeButton.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10M8 3v10"/></svg>';
 					}
-					actions.append(minimizeButton, maximizeButton, closeButton);
+					actions.append(rthButton, minimizeButton, maximizeButton, closeButton);
 					cell.append(titlebar);
 					titlebar.addEventListener('click', function (event) {
 						if (cell.classList.contains('is-minimized') && !event.target.closest('button')) {
@@ -1100,6 +1109,7 @@
 					if ((activeCanvas().rthCharts || []).includes(index)) {
 						datafeedClient.setRegularHoursEnabled(true);
 					}
+					updateChartRthToggle(index);
 					var options = Object.assign({}, widgetOptions, {
 						container: containerId,
 						symbol: defaultChartSymbols[index % defaultChartSymbols.length],
@@ -1707,8 +1717,6 @@
 				chartGrid.hidden = false;
 				restoreWatchlistCanvasState(initialCanvas);
 				addChartButton.addEventListener('click', function () { addChartWindow(); });
-				rthToggleButton.addEventListener('click', toggleActiveChartRth);
-				updateRthToggle();
 				watchlistToggle.addEventListener('click', function () {
 					setWatchlistOpen(watchlistPanel.hidden || watchlistPanel.classList.contains('is-minimized'));
 				});
@@ -1955,7 +1963,6 @@
 				<main class="chart-workspace">
 					<div class="chart-layout-bar" aria-label="Chart layout controls">
 						<button id="add-chart-window" class="workspace-action-button" type="button" aria-label="Add chart" title="Add chart"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10"/></svg><span>CHART</span></button>
-						<button id="rth-toggle" class="workspace-action-button" type="button" aria-label="Use regular trading hours" title="RTH off · click to show RTH (09:30–16:14 New York)" aria-pressed="false"><span>RTH ADJ</span></button>
 						<button id="watchlist-toggle" class="workspace-action-button" type="button" aria-label="Open watchlist" title="Open watchlist app" aria-pressed="false"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 7.5h10M3 11.5h6"/><circle cx="11.5" cy="11.5" r="1.5"/></svg><span>WATCHLIST</span></button>
 						<button id="command-palette-toggle" class="workspace-action-button command-open-button" type="button" aria-label="Open command palette" title="Command palette (/)"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m6 4-3 4 3 4m4-8 3 4-3 4"/></svg><span>COMMAND</span><kbd>/</kbd></button>
 						<div id="canvas-tabs" class="canvas-tabs" aria-label="Workspace canvases">
